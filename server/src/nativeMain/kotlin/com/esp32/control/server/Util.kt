@@ -1,22 +1,9 @@
 package com.esp32.control.server
 
-import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.alloc
-import kotlinx.cinterop.memScoped
-import kotlinx.cinterop.ptr
-import platform.posix.gettimeofday
-import platform.posix.timeval
 import kotlin.random.Random
+import kotlin.time.Clock
 
-@OptIn(ExperimentalForeignApi::class)
-fun nowEpochMs(): Long = memScoped {
-    val tv = alloc<timeval>()
-    if (gettimeofday(tv.ptr, null) != 0) {
-        0L
-    } else {
-        tv.tv_sec * 1000L + tv.tv_usec / 1000L
-    }
-}
+fun nowEpochMs(): Long = Clock.System.now().toEpochMilliseconds()
 
 fun newId(prefix: String): String {
     val bytes = Random.nextBytes(12)

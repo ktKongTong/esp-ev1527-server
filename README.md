@@ -45,7 +45,7 @@ OpenMQTTGateway 315MHz 网关，实现**控制开关、学习新设备、移除�
 ```
 esp32/
 ├── contract/        KMP 共享协议：DTO、SSE 事件、ContractJson、枚举
-├── server/          Ktor 3 + Kotlin/Native（linuxArm64）+ 极简 MQTT 客户端
+├── server/          Ktor 3 + Kotlin/Native（linuxArm64）+ KMQTT 适配层
 ├── shared/          Compose Multiplatform UI 与 Ktor 客户端（Android + Wasm）
 ├── androidApp/      Android 应用壳（Material You 动态取色）
 ├── webApp/          Kotlin/Wasm Web 应用与 index.html
@@ -71,6 +71,8 @@ esp32/
 | Gradle | 9.6.1 | Wrapper 已包含 |
 | JDK | 17 | 编译与 Gradle 运行 |
 | Ktor | 3.6.1 | 服务端 CIO；客户端 Android 用 CIO，Web 用 Js/fetch |
+| MQTT | KMQTT 1.0.0 | MIT；MQTT 3.1.1 / QoS 1 / Kotlin-Native `linuxArm64`，适配层负责重连 |
+| SSE | Ktor 3.6.1 `server-sse` | 服务端事件流、心跳与 `Last-Event-ID` 补发 |
 | Kotlin/Wasm | 2.4.21 | 浏览器端使用 WasmGC |
 | EMQX | 5.8.7 | 仅测试栈使用，可替换为任意 MQTT 3.1.1 Broker |
 
@@ -335,6 +337,10 @@ CLI：`on 1`、`off 1`、`rand`、`press <code>`、`kill`、`boot`、`status`。
   `415 unsupported_media_type`，且 `X-Request-Id` / `Cache-Control` 不重复。
 - 无头 Chrome（SwiftShader）中 Wasm UI 可渲染中文、读取 API、开始学习、
   显示采集进度与候选码。
+- Broker 未启动或重启 EMQX 时服务端进程不退出，KMQTT 适配层按退避自动
+  重连，Broker 上线后网关状态恢复为 `online`；SSE 的心跳、事件 `id`/`event` 字段、`Last-Event-ID` 补发和未知
+  ID 的 `stream.reset` 均已验证。
+- 复用审计与 MQTT 库取舍见 [`docs/reuse-audit.md`](docs/reuse-audit.md)。
 
 ## 常见问题
 

@@ -7,6 +7,7 @@ ktor = "3.6.1"
 kotlinx-coroutines = "1.11.0"
 kotlinx-serialization = "1.11.0"
 kotlinx-browser = "0.5.0"
+kmqtt = "1.0.0"
 activity-compose = "1.10.1"
 android-compile-sdk = "35"
 android-min-sdk = "26"
@@ -33,7 +34,10 @@ ktor-server-core = { module = "io.ktor:ktor-server-core", version.ref = "ktor" }
 ktor-server-cio = { module = "io.ktor:ktor-server-cio", version.ref = "ktor" }
 ktor-server-content-negotiation = { module = "io.ktor:ktor-server-content-negotiation", version.ref = "ktor" }
 ktor-server-cors = { module = "io.ktor:ktor-server-cors", version.ref = "ktor" }
+ktor-server-sse = { module = "io.ktor:ktor-server-sse", version.ref = "ktor" }
 ktor-server-status-pages = { module = "io.ktor:ktor-server-status-pages", version.ref = "ktor" }
+
+kmqtt-client = { module = "io.github.davidepianca98:kmqtt-client", version.ref = "kmqtt" }
 
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activity-compose" }
 

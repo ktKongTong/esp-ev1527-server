@@ -9,7 +9,6 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * In-memory SSE fan-out with a 256-event replay cache. A client that presents
@@ -28,7 +27,7 @@ class SseHub {
 
     suspend fun stream(
         lastEventId: String?,
-        write: suspend (ServerEvent?) -> Unit,
+        write: suspend (ServerEvent) -> Unit,
     ) = coroutineScope {
         val snapshot = events.replayCache
         val initialIds = snapshot.mapTo(mutableSetOf()) { it.eventId }
@@ -63,8 +62,7 @@ class SseHub {
 
         try {
             while (isActive) {
-                val event = withTimeoutOrNull(15_000) { channel.receive() }
-                write(event)
+                write(channel.receive())
             }
         } finally {
             collector.cancel()

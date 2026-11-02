@@ -9,7 +9,6 @@ import com.esp32.control.contract.ServerEvent
 import com.esp32.control.contract.StartLearningRequest
 import com.esp32.control.contract.TestLearningRequest
 import com.esp32.control.contract.type
-import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -26,7 +25,11 @@ import io.ktor.server.plugins.UnsupportedMediaTypeException
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.plugins.statuspages.StatusPages
+import io.ktor.server.sse.SSE
+import io.ktor.server.sse.heartbeat
+import io.ktor.server.sse.sse
 import io.ktor.serialization.kotlinx.json.json
+import io.ktor.sse.ServerSentEvent
 import io.ktor.server.request.contentLength
 import io.ktor.server.request.contentType
 import io.ktor.server.request.uri
@@ -34,14 +37,12 @@ import io.ktor.server.request.receive
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
-import io.ktor.server.response.respondBytesWriter
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import io.ktor.util.AttributeKey
-import io.ktor.utils.io.writeFully
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +51,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
+import kotlin.time.Duration.Companion.seconds
 
 private val RequestIdKey = AttributeKey<String>("esp32.requestId")
 
@@ -119,6 +121,7 @@ fun Application.module(control: ControlPlane, hub: SseHub, config: ServerConfig)
         exposeHeader("X-Request-Id")
         exposeHeader("Idempotent-Replayed")
     }
+    install(SSE)
     install(StatusPages) {
         exception<ApiException> { call, cause ->
             call.respondApiError(cause.status, cause.code, cause.message, cause.details)
@@ -294,26 +297,18 @@ fun Application.module(control: ControlPlane, hub: SseHub, config: ServerConfig)
                 call.respond(HttpStatusCode.NoContent)
             }
 
-            get("/events") {
-                call.response.header(HttpHeaders.CacheControl, "no-cache")
-                call.response.header(HttpHeaders.Connection, "keep-alive")
+            sse("/events") {
+                heartbeat { period = 15.seconds }
+                send(ServerSentEvent(retry = 3_000))
                 val lastEventId = call.request.headers["Last-Event-ID"]
-                call.respondBytesWriter(
-                    contentType = ContentType.Text.EventStream,
-                    status = HttpStatusCode.OK,
-                ) {
-                    writeFully("retry: 3000\n\n".encodeToByteArray())
-                    flush()
-                    hub.stream(lastEventId) { event ->
-                        if (event == null) {
-                            writeFully(": heartbeat\n\n".encodeToByteArray())
-                        } else {
-                            writeFully("id: ${event.eventId}\n".encodeToByteArray())
-                            writeFully("event: ${event.type}\n".encodeToByteArray())
-                            writeFully("data: ${encodeEvent(event)}\n\n".encodeToByteArray())
-                        }
-                        flush()
-                    }
+                hub.stream(lastEventId) { event ->
+                    send(
+                        ServerSentEvent(
+                            data = encodeEvent(event),
+                            event = event.type,
+                            id = event.eventId,
+                        ),
+                    )
                 }
             }
         }
