@@ -1,0 +1,66 @@
+# Gradle / Kotlin
+.gradle/
+**/.gradle/
+.kotlin/
+**/.kotlin/
+build/
+**/build/
+kotlin-js-store/
+**/kotlin-js-store/
+
+# Android / local machine config
+local.properties
+**/local.properties
+*.apk
+*.aab
+*.ap_
+*.dex
+*.jks
+*.keystore
+keystore.properties
+.externalNativeBuild/
+.cxx/
+**/.externalNativeBuild/
+**/.cxx/
+
+# IDE
+.idea/
+**/.idea/
+.fleet/
+.vscode/
+*.iml
+*.ipr
+*.iws
+out/
+
+# OS / editor
+.DS_Store
+**/.DS_Store
+Thumbs.db
+*.swp
+*~
+*.orig
+*.rej
+
+# Secrets / environment
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime artifacts
+captures/
+**/captures/
+*.log
+*.hprof
+hs_err_pid*
+replay_pid*
+*.kexe
+node_modules/
+**/node_modules/
+
+# The mock/ project keeps its own .gitignore.

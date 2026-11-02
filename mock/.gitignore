@@ -1,0 +1,5 @@
+/omg315mock
+/omg315-mock
+*.test
+*.log
+.DS_Store

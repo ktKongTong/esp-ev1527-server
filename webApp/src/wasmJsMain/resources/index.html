@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#006C4C">
+    <title>ESP32 控制台 · Compose Multiplatform</title>
+    <!-- Start the 7.9 MB CJK font download while the Wasm module boots. -->
+    <link rel="preload" as="font" type="font/otf" crossorigin
+          href="composeResources/com.esp32.control.gui.resources/font/noto_sans_sc_regular.otf">
+    <style>
+        html, body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background: #FBFDF8;
+            -webkit-font-smoothing: antialiased;
+            text-rendering: optimizeLegibility;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            html, body {
+                background: #0F1512;
+            }
+        }
+
+        #composeApp {
+            width: 100%;
+            height: 100%;
+        }
+
+        noscript {
+            display: block;
+            padding: 24px;
+            font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+            color: #191C1A;
+        }
+    </style>
+</head>
+<body>
+<div id="composeApp"></div>
+<noscript>此应用由 Kotlin/Wasm 渲染，请启用 JavaScript 与 WebAssembly。</noscript>
+<script type="application/javascript" src="esp32Web.js"></script>
+</body>
+</html>

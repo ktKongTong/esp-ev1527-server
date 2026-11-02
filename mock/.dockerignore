@@ -1,0 +1,8 @@
+README.md
+docker-compose*.yml
+scripts/
+*.test
+*.log
+omg315mock
+omg315-mock
+.DS_Store

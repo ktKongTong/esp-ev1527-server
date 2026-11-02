@@ -1,0 +1,25 @@
+# 可选覆盖文件：一条命令拉起“EMQX + Mock”独立联调栈。
+#   docker compose -f docker-compose.yml -f docker-compose.emqx.yml up --build -d
+#
+# 注意：该文件会把 EMQX 的 1883 端口映射到宿主机。如果你本机已经有 EMQX
+# 在监听 1883，请不要使用本文件，直接 `docker compose up` 连接现有 Broker。
+services:
+  emqx:
+    image: emqx/emqx:5.8.7
+    container_name: omg315-emqx
+    ports:
+      - "1883:1883"
+      - "18083:18083"
+    healthcheck:
+      test: ["CMD", "emqx", "ctl", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  mock:
+    environment:
+      MQTT_URL: tcp://emqx:1883
+    depends_on:
+      emqx:
+        condition: service_healthy
