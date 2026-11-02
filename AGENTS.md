@@ -119,7 +119,30 @@ New implementation scope: <what is genuinely new>
 - 在 UI 中重复服务端状态机、在客户端重复校验协议、在 `shared` 重复
   `contract` 类型。
 
-## 6. 提交前检查
+## 6. Linear 同步
+
+Linear 项目是仓库文档与任务状态的对外镜像；本地文件是内容源。
+
+- 团队：`ktlab`
+- 项目：`ESP32 Control 接口、状态机与数据流契约`
+- 文档映射（本地文件 ↔ Linear 文档标题；尚未创建时按此标题创建）：
+  - `docs/api-contract-v1.md` ↔ `ESP32 Control 接口、状态机与数据流契约 v1`
+  - `docs/reuse-audit.md` ↔ `ESP32 Control 复用审计（2026-11-03）`
+
+规则：
+
+- 新增或修改 `docs/` 下的契约、状态机、数据流、架构决策、复用审计等文档时，
+  必须在同一改动中创建或更新对应的 Linear 文档。
+- 新增、关闭本地 issue/task/待办，或完成一个可交付变更时，必须同步创建或
+  更新 Linear issue，写清状态、验收结果和对应 commit。
+- Linear 文档或 issue 中应包含本地文件路径或 commit hash，便于双向定位。
+- 本地内容与 Linear 冲突时以本地仓库为准：先修正本地，再同步 Linear。
+- 不得把 secrets、token、`.env`、`local.properties`、密钥、抓码主题等敏感
+  内容写入 Linear。
+- Linear 暂时不可用时，在 PR/commit 说明中记录阻塞，恢复后补同步；不能用
+  “本地已完成”代替 Linear 更新。
+
+## 7. 提交前检查
 
 - [ ] 已按第 1 节顺序搜索完，并记录结论。
 - [ ] 未新增与既有实现重复的能力；如有重复，已合并或已删除旧实现。
@@ -127,6 +150,7 @@ New implementation scope: <what is genuinely new>
 - [ ] 自研部分已通过第 4 节校验，理由已写入。
 - [ ] 复用处的适配层存在，核心逻辑未直接耦合库内部 API。
 - [ ] `contract` 仍是协议的唯一来源，服务端与客户端没有重复 DTO。
+- [ ] 本次涉及的文档与 issue 已同步到 Linear，并附上 Linear 链接。
 - [ ] 构建与测试通过：
 
 ```bash
