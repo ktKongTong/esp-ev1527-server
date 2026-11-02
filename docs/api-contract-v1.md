@@ -1,13 +1,14 @@
 # ESP32 Control 接口、状态机与数据流契约 v1
 
-- 状态：**草案（Draft）**，尚未实现
+- 状态：**已实现**（contract v1.1.0）
 - 日期：2026-11-03
 - 适用端：`server`（Ktor + Kotlin/Native）、`androidApp`、`webApp`
 - 覆盖范围：**控制设备开关、学习新设备、移除旧设备**，以及三者依赖的
   网关状态机、设备生命周期、命令状态机、学习会话状态机和事件数据流
 
-> 本文只定义协议与状态机，不包含实现代码。Kotlin 片段是类型示意，
-> 不是可以直接编译的源文件。
+> 本文定义协议与状态机。DTO、枚举、SSE 事件与 `ContractJson` 已落在
+> [`contract`](../contract) 模块，服务端路由与 UI 均以该模块为准；
+> 文中 Kotlin 片段用于说明字段形状，可能与源码略去私有实现细节。
 
 ---
 
@@ -240,7 +241,7 @@ Server ──SSE device.removed──► 所有 Client
 | `linuxArm64` | `server` | 现有部署目标 |
 | `macosArm64` | `server`（可选） | 与 `-PenableMacosServer=true` 联动 |
 | `androidLibrary` | `shared` / `androidApp` | AGP 9 KMP library 插件 |
-| `wasmJs` | `shared` / `webApp` | 仅库目标，无需 browser 测试 |
+| `wasmJs` | `shared` / `webApp` | 库 + browser 目标 |
 
 `contract` 的 `commonMain` 只依赖 `kotlinx-serialization-core/json`。
 Android 目标继续使用 `kotlin { androidLibrary { ... } }`，
@@ -1929,9 +1930,11 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 
 ---
 
-## 19. 实现前待确认
+## 19. 设计取舍记录
 
-| # | 问题 | 建议 |
+以下问题在 v1 中按“建议”列实现；未实现项保留为 v2 候选。
+
+| # | 问题 | v1 决定 |
 | --- | --- | --- |
 | 1 | `confirm` 是否要求网关在线？ | 捕获阶段必须在线；`ready` 后保存不要求；`test` 要求在线 |
 | 2 | 是否允许“只学一个码”，另一个码后续补？ | v1 不允许；必须成对，避免半配置设备 |

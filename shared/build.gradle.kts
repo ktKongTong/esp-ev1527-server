@@ -34,6 +34,7 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies {
+            api(project(":contract"))
             api(libs.compose.runtime)
             api(libs.compose.foundation)
             api(libs.compose.material3)
