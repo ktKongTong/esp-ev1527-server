@@ -124,10 +124,11 @@ New implementation scope: <what is genuinely new>
 Linear 项目是仓库文档与任务状态的对外镜像；本地文件是内容源。
 
 - 团队：`ktlab`
-- 项目：`ESP32 Control 接口、状态机与数据流契约`
-- 文档映射（本地文件 ↔ Linear 文档标题；尚未创建时按此标题创建）：
-  - `docs/api-contract-v1.md` ↔ `ESP32 Control 接口、状态机与数据流契约 v1`
-  - `docs/reuse-audit.md` ↔ `ESP32 Control 复用审计（2026-11-03）`
+- 项目：`ESP32 Control · 接口、状态机与数据流契约`
+- 项目 URL：<https://linear.app/ktlab/project/esp32-control-接口状态机与数据流契约-2a9c6ad00148>
+- 文档映射（本地文件 ↔ Linear 文档；尚未创建时按标题创建）：
+  - `docs/api-contract-v1.md` ↔ [ESP32 Control 接口、状态机与数据流契约 v1](https://linear.app/ktlab/document/esp32-control-接口状态机与数据流契约-v1-267e7f96d14d)
+  - `docs/reuse-audit.md` ↔ [ESP32 Control 复用审计（2026-11-03）](https://linear.app/ktlab/document/esp32-control-复用审计2026-11-03-8273fdddb293)
 
 规则：
 
