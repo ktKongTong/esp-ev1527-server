@@ -4,10 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#006C4C">
+    <link rel="icon" href="data:,">
     <title>ESP32 控制台 · Compose Multiplatform</title>
-    <!-- Start the 7.9 MB CJK font download while the Wasm module boots. -->
-    <link rel="preload" as="font" type="font/otf" crossorigin
-          href="composeResources/com.esp32.control.gui.resources/font/noto_sans_sc_regular.otf">
+    <!-- Compose 会按需请求 Web 字体；不再额外 preload，避免同一 1.8 MB
+         字体被下载两次。 -->
     <style>
         html, body {
             width: 100%;
@@ -31,6 +31,140 @@
             height: 100%;
         }
 
+        #bootLoading {
+            position: fixed;
+            inset: 0;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            padding: 24px;
+            box-sizing: border-box;
+            background: #FBFDF8;
+            color: #191C1A;
+            font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
+            text-align: center;
+        }
+
+        #bootLoading[hidden] {
+            display: none;
+        }
+
+        #bootLoading .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #CAC4D0;
+            border-top-color: #006C4C;
+            border-radius: 50%;
+            animation: boot-spin 0.9s linear infinite;
+        }
+
+        #bootLoading p {
+            margin: 0;
+            font-size: 15px;
+            line-height: 1.6;
+        }
+
+        #bootLoading .hint {
+            color: #49454F;
+            font-size: 12px;
+        }
+
+        @keyframes boot-spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        @media (prefers-color-scheme: dark) {
+            #bootLoading {
+                background: #0F1512;
+                color: #E1E3DF;
+            }
+
+            #bootLoading .spinner {
+                border-color: #49454F;
+                border-top-color: #4FD1A1;
+            }
+
+            #bootLoading .hint {
+                color: #CAC4D0;
+            }
+        }
+
+        #bootError {
+            position: fixed;
+            inset: 0;
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            box-sizing: border-box;
+            overflow: auto;
+            background: #FBFDF8;
+            color: #191C1A;
+            font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
+        }
+
+        #bootError[hidden] {
+            display: none;
+        }
+
+        #bootError .card {
+            width: 100%;
+            max-width: 560px;
+            box-sizing: border-box;
+            padding: 24px;
+            border: 1px solid #CAC4D0;
+            border-radius: 16px;
+            background: #FFFBFE;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+        }
+
+        #bootError h1 {
+            margin: 0 0 12px;
+            font-size: 20px;
+            line-height: 1.4;
+        }
+
+        #bootError p {
+            margin: 0 0 12px;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+
+        #bootError pre {
+            max-height: 40vh;
+            margin: 0;
+            padding: 12px;
+            overflow: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+            border-radius: 8px;
+            background: #F3EDF7;
+            font-size: 11px;
+            line-height: 1.4;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            #bootError {
+                background: #0F1512;
+                color: #E1E3DF;
+            }
+
+            #bootError .card {
+                border-color: #49454F;
+                background: #1C1B1F;
+            }
+
+            #bootError pre {
+                background: #2B2930;
+            }
+        }
+
         noscript {
             display: block;
             padding: 24px;
@@ -41,7 +175,142 @@
 </head>
 <body>
 <div id="composeApp"></div>
+<div id="bootLoading" aria-live="polite">
+    <div class="spinner" aria-hidden="true"></div>
+    <p>正在加载 ESP32 控制台…</p>
+    <p class="hint" id="bootHint">首次加载需要下载 Kotlin/Wasm 运行时</p>
+</div>
+<div id="bootError" role="alert" hidden>
+    <div class="card">
+        <h1 id="bootErrorTitle">应用启动失败</h1>
+        <p id="bootErrorText"></p>
+        <pre id="bootErrorDetail"></pre>
+    </div>
+</div>
 <noscript>此应用由 Kotlin/Wasm 渲染，请启用 JavaScript 与 WebAssembly。</noscript>
-<script type="application/javascript" src="esp32Web.js"></script>
+<script>
+    (function () {
+        var box = document.getElementById('bootError');
+        var title = document.getElementById('bootErrorTitle');
+        var text = document.getElementById('bootErrorText');
+        var detail = document.getElementById('bootErrorDetail');
+        var loading = document.getElementById('bootLoading');
+
+        function show(heading, message, extra) {
+            if (!box.hidden) return;
+            loading.hidden = true;
+            title.textContent = heading;
+            text.textContent = message;
+            detail.textContent = (extra ? extra + '\n\n' : '') + navigator.userAgent;
+            box.hidden = false;
+        }
+
+        // ComposeViewport 把画布放在 #composeApp 的 shadow root 里，
+        // 普通 querySelector 看不到，必须同时检查 shadowRoot。
+        function appMounted() {
+            var root = document.getElementById('composeApp');
+            return !!(root && (root.querySelector('canvas') ||
+                (root.shadowRoot && root.shadowRoot.querySelector('canvas'))));
+        }
+
+        function hideLoadingWhenMounted() {
+            if (appMounted()) {
+                loading.hidden = true;
+                clearInterval(hideTimer);
+            }
+        }
+
+        // 只轮询根节点，不用 document.body 的 subtree MutationObserver：
+        // Compose 会频繁改动无障碍 DOM，深度观察会拖慢首帧。
+        var hideTimer = setInterval(hideLoadingWhenMounted, 250);
+        hideLoadingWhenMounted();
+
+        // 首次加载约 14 MB。移动网络下只显示转圈会让人以为页面卡死，
+        // 因此给出已等待时间，并在超过 90 秒时明确提示链路过慢。
+        var bootStarted = Date.now();
+        var bootHint = document.getElementById('bootHint');
+        var hintTimer = setInterval(function () {
+            if (loading.hidden) {
+                clearInterval(hintTimer);
+                return;
+            }
+            var seconds = Math.floor((Date.now() - bootStarted) / 1000);
+            if (seconds >= 90) {
+                bootHint.textContent = '网络较慢：已等待 ' + seconds +
+                    ' 秒。首次加载约 14 MB，请保持页面打开。';
+            } else if (seconds >= 20) {
+                bootHint.textContent = '正在下载 Kotlin/Wasm 运行时，已等待 ' +
+                    seconds + ' 秒…';
+            }
+        }, 1000);
+
+        window.__esp32BootError = function (heading, message, extra) {
+            show(heading || '应用启动失败', message || '', extra);
+        };
+
+        window.addEventListener('error', function (event) {
+            if (appMounted()) return;
+            var message = event.message || '';
+            var error = event.error;
+            if (error && error.stack) message = error.stack;
+            show('页面启动失败', '应用脚本执行时发生错误。', message);
+        });
+
+        window.addEventListener('unhandledrejection', function (event) {
+            if (appMounted()) return;
+            var reason = event.reason;
+            var message = reason && (reason.stack || reason.message) || String(reason || '');
+            show('页面启动失败', '应用脚本初始化时发生错误。', message);
+        });
+
+        // Kotlin/Wasm 需要 WasmGC 与异常处理。先用当前运行时实际编译一个小模块，
+        // 比检查 navigator.userAgent 更可靠；失败时直接给出可读原因。
+        var probe = {
+            ua: navigator.userAgent,
+            wasm: typeof WebAssembly,
+            tag: typeof WebAssembly !== 'undefined' ? typeof WebAssembly.Tag : 'missing',
+            jstag: typeof WebAssembly !== 'undefined' ? typeof WebAssembly.JSTag : 'missing',
+            streaming: typeof WebAssembly !== 'undefined' ? typeof WebAssembly.instantiateStreaming : 'missing',
+            gc: 'not-run',
+            tagCtor: 'not-run'
+        };
+        try {
+            if (typeof WebAssembly === 'undefined') {
+                throw new Error('WebAssembly is not available');
+            }
+            // 一个只包含 GC array 类型与 array.get 的最小模块。
+            new WebAssembly.Module(Uint8Array.from([
+                0, 97, 115, 109, 1, 0, 0, 0, 1, 11, 2, 94, 119, 1, 96, 2, 100, 0,
+                127, 1, 127, 3, 2, 1, 1, 7, 11, 1, 7, 97, 49, 54, 95, 103, 101,
+                116, 0, 0, 10, 11, 1, 9, 0, 32, 0, 32, 1, 251, 13, 0, 11, 0, 19,
+                4, 110, 97, 109, 101, 4, 12, 1, 0, 9, 97, 114, 114, 97, 121, 95,
+                105, 49, 54
+            ]));
+            probe.gc = 'ok';
+            new WebAssembly.Tag({parameters: ['externref']});
+            probe.tagCtor = 'ok';
+        } catch (error) {
+            probe.gc = String(error);
+            show(
+                '此浏览器无法启动应用',
+                'Kotlin/Wasm 需要支持 WasmGC 与异常处理的浏览器（Chrome 119+）。' +
+                '请更新 Chrome 后重试；桌面端可使用最新版 Chrome、Edge 或 Firefox。',
+                probe.gc
+            );
+        }
+
+        // 探测失败时不再下载 600 KB 的应用脚本，直接保留错误卡片。
+        if (probe.gc === 'ok' && probe.tagCtor === 'ok') {
+            var appScript = document.createElement('script');
+            appScript.type = 'application/javascript';
+            // 文件名由 webpack 固定；带版本查询串，避免手机浏览器继续使用旧脚本。
+            appScript.src = 'esp32Web.js?v=20261103-1';
+            appScript.onerror = function () {
+                window.__esp32BootError('应用脚本加载失败', '请检查网络后重试。');
+            };
+            document.body.appendChild(appScript);
+        }
+    })();
+</script>
 </body>
 </html>

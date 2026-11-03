@@ -9,9 +9,6 @@ import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import com.esp32.control.gui.resources.Res
-import com.esp32.control.gui.resources.noto_sans_sc_regular
-import org.jetbrains.compose.resources.Font
 
 /**
  * Android actual returns wallpaper-based dynamic colors on API 31+.
@@ -19,6 +16,13 @@ import org.jetbrains.compose.resources.Font
  */
 @Composable
 expect fun platformColorScheme(darkTheme: Boolean): ColorScheme
+
+/**
+ * Android uses the full CJK font; Wasm uses a GB2312 subset to keep the
+ * first load within a mobile network budget.
+ */
+@Composable
+expect fun platformFontFamily(): FontFamily
 
 private val Esp32Shapes = Shapes(
     extraSmall = RoundedCornerShape(8.dp),
@@ -33,10 +37,9 @@ fun Esp32Theme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit,
 ) {
-    // Skiko on Wasm does not fall back to browser CJK fonts, so the app ships
-    // Noto Sans SC explicitly. The same family is used on Android for a
-    // consistent Material You look.
-    val appFontFamily = FontFamily(Font(Res.font.noto_sans_sc_regular))
+    // Skiko on Wasm does not fall back to browser CJK fonts, so both targets
+    // ship Noto Sans SC explicitly. The Wasm resource is a GB2312 subset.
+    val appFontFamily = platformFontFamily()
 
     MaterialTheme(
         colorScheme = platformColorScheme(darkTheme),
