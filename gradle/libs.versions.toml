@@ -12,7 +12,7 @@ activity-compose = "1.10.1"
 android-compile-sdk = "35"
 android-min-sdk = "26"
 android-target-sdk = "35"
-
+ktor-mqtt = "1.2.0"
 [libraries]
 compose-runtime = { module = "org.jetbrains.compose.runtime:runtime", version.ref = "compose-multiplatform" }
 compose-foundation = { module = "org.jetbrains.compose.foundation:foundation", version.ref = "compose-multiplatform" }
@@ -38,7 +38,7 @@ ktor-server-sse = { module = "io.ktor:ktor-server-sse", version.ref = "ktor" }
 ktor-server-status-pages = { module = "io.ktor:ktor-server-status-pages", version.ref = "ktor" }
 
 kmqtt-client = { module = "io.github.davidepianca98:kmqtt-client", version.ref = "kmqtt" }
-
+ktor-mqtt = { module = "dev.koft.ktor-mqtt:mqtt-client", version.ref = "ktor-mqtt" }
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activity-compose" }
 
 [plugins]

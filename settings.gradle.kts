@@ -16,6 +16,15 @@ pluginManagement {
 
 dependencyResolutionManagement {
     repositories {
+        maven {
+            url = uri("https://maven.pkg.github.com/ktkongtong/ktor-mqtt")
+            credentials {
+                username = providers.gradleProperty("gpr.user").orNull
+                    ?: System.getenv("GITHUB_ACTOR")
+                password = providers.gradleProperty("gpr.key").orNull
+                    ?: System.getenv("GITHUB_TOKEN")
+            }
+        }
         google {
             content {
                 includeGroupByRegex("com\\.android.*")
