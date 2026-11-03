@@ -20,6 +20,7 @@ kotlin {
         withHostTest {}
     }
 
+    linuxX64()
     linuxArm64()
 
     if (providers.gradleProperty("enableMacosServer").orNull == "true") {

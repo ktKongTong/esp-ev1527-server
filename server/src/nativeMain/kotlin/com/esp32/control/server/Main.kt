@@ -2,13 +2,11 @@ package com.esp32.control.server
 
 import com.esp32.control.contract.ApiErrorBody
 import com.esp32.control.contract.ApiErrorEnvelope
-import com.esp32.control.contract.CommandRequest
-import com.esp32.control.contract.ConfirmLearningRequest
 import com.esp32.control.contract.ContractJson
 import com.esp32.control.contract.ServerEvent
-import com.esp32.control.contract.StartLearningRequest
-import com.esp32.control.contract.TestLearningRequest
 import com.esp32.control.contract.type
+import com.esp32.control.server.routes.deviceRoute
+import com.esp32.control.server.routes.learningRoute
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
@@ -30,16 +28,12 @@ import io.ktor.server.sse.heartbeat
 import io.ktor.server.sse.sse
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.sse.ServerSentEvent
-import io.ktor.server.request.contentLength
 import io.ktor.server.request.contentType
 import io.ktor.server.request.uri
-import io.ktor.server.request.receive
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
-import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
-import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import io.ktor.util.AttributeKey
@@ -200,102 +194,8 @@ fun Application.module(control: ControlPlane, hub: SseHub, config: ServerConfig)
             get("/health") {
                 call.respond(control.health())
             }
-
-            get("/devices") {
-                call.respond(control.listDevices())
-            }
-
-            get("/devices/{deviceId}") {
-                val deviceId = call.parameters["deviceId"] ?: throw invalidDeviceId()
-                call.respond(control.getDevice(deviceId))
-            }
-
-            post("/devices/{deviceId}/commands") {
-                val deviceId = call.parameters["deviceId"] ?: throw invalidDeviceId()
-                val idempotencyKey = call.request.headers["Idempotency-Key"]
-                    ?: throw ApiException(
-                        HttpStatusCode.BadRequest,
-                        "invalid_request",
-                        "Idempotency-Key is required",
-                    )
-                val request = call.receive<CommandRequest>()
-                val result = control.issueCommand(deviceId, request.action, idempotencyKey)
-                if (result.replayed) {
-                    call.response.header("Idempotent-Replayed", "true")
-                }
-                call.respond(HttpStatusCode.Accepted, result.accepted)
-            }
-
-            get("/commands/{commandId}") {
-                val commandId = call.parameters["commandId"]
-                    ?: throw ApiException(
-                        HttpStatusCode.NotFound,
-                        "command_not_found",
-                        "Command not found",
-                    )
-                call.respond(control.getCommand(commandId))
-            }
-
-            delete("/devices/{deviceId}") {
-                val deviceId = call.parameters["deviceId"] ?: throw invalidDeviceId()
-                control.deleteDevice(deviceId)
-                call.respond(HttpStatusCode.NoContent)
-            }
-
-            post("/learning/sessions") {
-                val length = call.request.contentLength()
-                val request = if (length == null || length == 0L) {
-                    StartLearningRequest()
-                } else {
-                    call.receive<StartLearningRequest>()
-                }
-                call.respond(HttpStatusCode.Created, control.startLearning(request))
-            }
-
-            get("/learning/sessions/{sessionId}") {
-                val sessionId = call.parameters["sessionId"]
-                    ?: throw learningNotFound()
-                call.respond(control.getLearning(sessionId))
-            }
-
-            post("/learning/sessions/{sessionId}/candidates/{candidateId}/accept") {
-                val sessionId = call.parameters["sessionId"] ?: throw learningNotFound()
-                val candidateId = call.parameters["candidateId"]
-                    ?: throw ApiException(
-                        HttpStatusCode.NotFound,
-                        "candidate_not_found",
-                        "Candidate not found",
-                    )
-                call.respond(control.acceptCandidate(sessionId, candidateId))
-            }
-
-            post("/learning/sessions/{sessionId}/rescan") {
-                val sessionId = call.parameters["sessionId"] ?: throw learningNotFound()
-                call.respond(control.rescan(sessionId))
-            }
-
-            post("/learning/sessions/{sessionId}/test") {
-                val sessionId = call.parameters["sessionId"] ?: throw learningNotFound()
-                val request = call.receive<TestLearningRequest>()
-                call.respond(
-                    HttpStatusCode.Accepted,
-                    control.testLearning(sessionId, request.slot),
-                )
-            }
-
-            post("/learning/sessions/{sessionId}/confirm") {
-                val sessionId = call.parameters["sessionId"] ?: throw learningNotFound()
-                val request = call.receive<ConfirmLearningRequest>()
-                val confirmation = control.confirmLearning(sessionId, request)
-                call.response.header(HttpHeaders.Location, "/api/v1/devices/${confirmation.device.id}")
-                call.respond(HttpStatusCode.Created, confirmation)
-            }
-
-            delete("/learning/sessions/{sessionId}") {
-                val sessionId = call.parameters["sessionId"] ?: throw learningNotFound()
-                control.cancelLearning(sessionId)
-                call.respond(HttpStatusCode.NoContent)
-            }
+            deviceRoute(control)
+            learningRoute(control)
 
             sse("/events") {
                 heartbeat { period = 15.seconds }
@@ -338,13 +238,13 @@ private suspend fun ApplicationCall.respondApiError(
 private fun encodeEvent(event: ServerEvent): String =
     ContractJson.encodeToString(ServerEvent.serializer(), event)
 
-private fun invalidDeviceId(): ApiException = ApiException(
+internal fun invalidDeviceId(): ApiException = ApiException(
     HttpStatusCode.BadRequest,
     "invalid_device_id",
     "Invalid device id",
 )
 
-private fun learningNotFound(): ApiException = ApiException(
+internal fun learningNotFound(): ApiException = ApiException(
     HttpStatusCode.NotFound,
     "learning_session_not_found",
     "Learning session not found",

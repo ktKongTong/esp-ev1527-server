@@ -16,6 +16,15 @@ kotlin {
         }
     }
 
+    linuxX64 {
+        binaries {
+            executable {
+                baseName = "esp32-control-server"
+                entryPoint = "com.esp32.control.server.main"
+            }
+        }
+    }
+
     if (providers.gradleProperty("enableMacosServer").orNull == "true") {
         macosArm64 {
             binaries {
