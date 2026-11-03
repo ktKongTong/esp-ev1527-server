@@ -287,12 +287,15 @@ SSE 事件类型：`gateway.updated`、`device.added`、`device.updated`、
 ```bash
 curl -s http://127.0.0.1:8099/mock/health
 curl -s -X POST http://127.0.0.1:8099/mock/press-button \
-  -H 'Content-Type: application/json' -d '{"code":1714739}'
+  -H 'Content-Type: application/json' -d '{"code":1714739,"frames":3}'
+curl -s -X POST http://127.0.0.1:8099/mock/transmit \
+  -H 'Content-Type: application/json' -d '{"code":1714739,"repeat":5}'
 curl -s -X POST http://127.0.0.1:8099/mock/kill   # 触发 LWT offline
 curl -s -X POST http://127.0.0.1:8099/mock/boot   # 重新上线
 ```
 
-CLI：`on 1`、`off 1`、`rand`、`press <code>`、`kill`、`boot`、`status`。
+CLI：`on 1`、`off 1`、`rand`、`press <code>`、`burst <code> [frames]`、
+`send <code> [repeat]`、`kill`、`boot`、`status`。
 详见 [`mock/README.md`](mock/README.md)。
 
 ## Material You 与字体

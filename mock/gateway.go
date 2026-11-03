@@ -38,6 +38,13 @@ type Gateway struct {
 	conn      net.Conn
 	session   *mqttSession
 
+	rxFrames        uint64
+	txFrames        uint64
+	lastRX          *RFCode
+	lastRXAtEpochMs int64
+	lastTX          *TXFrame
+	lastTXAtEpochMs int64
+
 	bootCh chan struct{}
 }
 
@@ -280,32 +287,114 @@ func (g *Gateway) handleTXCommand(_ mqtt.Client, msg mqtt.Message) {
 		g.log.Printf("[WARN] 无法解析 315M 发射指令: %v", err)
 		return
 	}
-
-	g.log.Printf("[315M TX] 模拟天线发射: Value=%d (HEX: %s), 重放=%d次",
-		*cmd.Value, formatHex(*cmd.Value), cmd.repeatCount())
-
-	protocol, length := rfProtocol, rfBitLength
-	if cmd.Protocol != nil {
-		protocol = *cmd.Protocol
+	frame := cmd.frame()
+	if _, err := g.TransmitCode(frame.Value, frame.Protocol, frame.Length, frame.Repeat, "MQTT"); err != nil {
+		g.log.Printf("[WARN] 模拟 315M 发射失败: %v", err)
+		return
 	}
-	if cmd.Length != nil {
-		length = *cmd.Length
-	}
-	if protocol != rfProtocol || length != rfBitLength {
-		g.log.Printf("[315M TX] 非默认射频参数: protocol=%d, length=%d", protocol, length)
+
+	// Real OpenMQTTGateway 315 receivers usually do not hear their own
+	// transmission. Keep that default; enable -tx-echo only when an integration
+	// test needs to exercise the server's optional command confirmation path.
+	if g.cfg.TXEcho {
+		if _, err := g.PressBurst(frame.Value, "TX 回显（测试）", 1, 0); err != nil {
+			g.log.Printf("[WARN] TX 回显失败: %v", err)
+		}
 	}
 }
 
-// PressCode publishes a simulated physical remote-control capture. label is
-// only used for the human-readable console line.
-func (g *Gateway) PressCode(code uint64, label string) (RFCode, error) {
+// TransmitCode simulates the ESP32's outbound 315MHz transmission. It does not
+// publish to MQTT: a real transmitter has no protocol-level acknowledgement, so
+// the only observable effect is the simulated RF burst (and the counters).
+func (g *Gateway) TransmitCode(value uint64, protocol, length, repeat int, label string) (TXFrame, error) {
+	frame := TXFrame{Value: value, Protocol: protocol, Length: length, Repeat: repeat}
+	if err := validateRFParams(value, protocol, length); err != nil {
+		return frame, err
+	}
+	if repeat < 1 || repeat > rfMaxRepeat {
+		return frame, fmt.Errorf("repeat 必须在 1-%d 之间", rfMaxRepeat)
+	}
+
+	g.mu.Lock()
+	powered := g.powered
+	g.mu.Unlock()
+	if !powered {
+		return frame, ErrPoweredOff
+	}
+
+	g.mu.Lock()
+	g.txFrames += uint64(repeat)
+	copied := frame
+	g.lastTX = &copied
+	g.lastTXAtEpochMs = time.Now().UnixMilli()
+	g.mu.Unlock()
+
+	g.log.Printf("[315M TX] 模拟天线发射: Value=%d (HEX: %s), 重放=%d次",
+		value, formatHex(value), repeat)
+	if protocol != rfProtocol || length != rfBitLength {
+		g.log.Printf("[315M TX] 非默认射频参数: protocol=%d, length=%d", protocol, length)
+	}
+	if label != "" {
+		g.log.Printf("[315M TX] 来源: %s", label)
+	}
+	return frame, nil
+}
+
+// PressBurst publishes one or more simulated RF frames from a physical remote.
+// A real 315MHz button press often produces multiple duplicate frames; sending
+// them with a short interval exercises the server's press clustering (frames
+// within 400ms count as one physical press). label is only used for logging.
+func (g *Gateway) PressBurst(code uint64, label string, frames int, interval time.Duration) (RFCode, error) {
 	payload := newRFCode(code)
 	if code > rfMax24Bit {
 		return payload, fmt.Errorf("value=%d 超出 24 位范围 (0-%d)", code, rfMax24Bit)
 	}
+	if frames < 1 || frames > rfMaxPressFrames {
+		return payload, fmt.Errorf("frames 必须在 1-%d 之间", rfMaxPressFrames)
+	}
+	if interval < 0 {
+		return payload, errors.New("interval 不能为负数")
+	}
+	if frames > 1 && interval == 0 {
+		interval = 80 * time.Millisecond
+	}
+
+	for i := 0; i < frames; i++ {
+		if err := g.publishCapture(payload); err != nil {
+			return payload, err
+		}
+		if i+1 < frames {
+			time.Sleep(interval)
+		}
+	}
+
+	if label == "" {
+		label = "模拟接收到 315M 信号"
+	}
+	if frames == 1 {
+		g.log.Printf("[315M RX] %s: Value=%d (HEX: %s), delay=%dms",
+			label, code, formatHex(code), rfReceiveDelayMS)
+	} else {
+		g.log.Printf("[315M RX] %s: Value=%d (HEX: %s), frames=%d, interval=%s, delay=%dms",
+			label, code, formatHex(code), frames, interval, rfReceiveDelayMS)
+	}
+	raw, _ := payload.marshal()
+	g.log.Printf("[MQTT] -> %s %s", g.topics.RX, string(raw))
+	return payload, nil
+}
+
+// PressCode is the single-frame convenience form used by the CLI and the
+// original HTTP endpoint.
+func (g *Gateway) PressCode(code uint64, label string) (RFCode, error) {
+	return g.PressBurst(code, label, 1, 0)
+}
+
+// publishCapture publishes one RX frame and records it only after the broker
+// acknowledges the QoS 1 publish.
+func (g *Gateway) publishCapture(payload RFCode) error {
 	raw, err := payload.marshal()
 	if err != nil {
-		return payload, err
+		return err
 	}
 
 	g.mu.Lock()
@@ -315,26 +404,27 @@ func (g *Gateway) PressCode(code uint64, label string) (RFCode, error) {
 	g.mu.Unlock()
 
 	if !powered {
-		return payload, ErrPoweredOff
+		return ErrPoweredOff
 	}
 	if !connected {
-		return payload, ErrNotConnected
+		return ErrNotConnected
 	}
 
 	tok := client.Publish(g.topics.RX, rfQoS, false, raw)
 	if !tok.WaitTimeout(3 * time.Second) {
-		return payload, errors.New("发布 315toMQTT 超时")
+		return errors.New("发布 315toMQTT 超时")
 	}
 	if err := tok.Error(); err != nil {
-		return payload, err
+		return err
 	}
 
-	if label == "" {
-		label = "模拟接收到 315M 信号"
-	}
-	g.log.Printf("[315M RX] %s: Value=%d (HEX: %s), delay=%dms", label, code, formatHex(code), rfReceiveDelayMS)
-	g.log.Printf("[MQTT] -> %s %s", g.topics.RX, string(raw))
-	return payload, nil
+	g.mu.Lock()
+	g.rxFrames++
+	copied := payload
+	g.lastRX = &copied
+	g.lastRXAtEpochMs = time.Now().UnixMilli()
+	g.mu.Unlock()
+	return nil
 }
 
 // Kill simulates an ESP32 power cut: the TCP socket is closed without an MQTT
@@ -453,6 +543,13 @@ type Status struct {
 	VersionValue  string `json:"gateway_version"`
 	CommandTopic  string `json:"command_topic"`
 	RXTopic       string `json:"rx_topic"`
+
+	RXFrames        uint64   `json:"rx_frames"`
+	TXFrames        uint64   `json:"tx_frames"`
+	LastRX          *RFCode  `json:"last_rx,omitempty"`
+	LastRXAtEpochMs int64    `json:"last_rx_at_epoch_ms,omitempty"`
+	LastTX          *TXFrame `json:"last_tx,omitempty"`
+	LastTXAtEpochMs int64    `json:"last_tx_at_epoch_ms,omitempty"`
 }
 
 func (g *Gateway) Status() Status {
@@ -460,20 +557,45 @@ func (g *Gateway) Status() Status {
 	powered := g.powered
 	client := g.client
 	connected := g.connected && client != nil && client.IsConnected()
+	rxFrames, txFrames := g.rxFrames, g.txFrames
+	lastRX, lastRXAt := copyRFCode(g.lastRX), g.lastRXAtEpochMs
+	lastTX, lastTXAt := copyTXFrame(g.lastTX), g.lastTXAtEpochMs
 	g.mu.Unlock()
 
 	return Status{
-		Powered:       powered,
-		MQTTConnected: connected,
-		ClientID:      g.cfg.ClientID,
-		Broker:        sanitizeBroker(g.cfg.MQTTURL),
-		UptimeSeconds: int64(time.Since(g.start).Seconds()),
-		LWT:           g.topics.LWT,
-		VersionTopic:  g.topics.Version,
-		VersionValue:  gatewayVersion,
-		CommandTopic:  g.topics.Command,
-		RXTopic:       g.topics.RX,
+		Powered:         powered,
+		MQTTConnected:   connected,
+		ClientID:        g.cfg.ClientID,
+		Broker:          sanitizeBroker(g.cfg.MQTTURL),
+		UptimeSeconds:   int64(time.Since(g.start).Seconds()),
+		LWT:             g.topics.LWT,
+		VersionTopic:    g.topics.Version,
+		VersionValue:    gatewayVersion,
+		CommandTopic:    g.topics.Command,
+		RXTopic:         g.topics.RX,
+		RXFrames:        rxFrames,
+		TXFrames:        txFrames,
+		LastRX:          lastRX,
+		LastRXAtEpochMs: lastRXAt,
+		LastTX:          lastTX,
+		LastTXAtEpochMs: lastTXAt,
 	}
+}
+
+func copyRFCode(src *RFCode) *RFCode {
+	if src == nil {
+		return nil
+	}
+	v := *src
+	return &v
+}
+
+func copyTXFrame(src *TXFrame) *TXFrame {
+	if src == nil {
+		return nil
+	}
+	v := *src
+	return &v
 }
 
 func (s *mqttSession) setConn(c net.Conn) {

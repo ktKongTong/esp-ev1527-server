@@ -46,6 +46,38 @@ func TestParseTXCommand(t *testing.T) {
 	}
 }
 
+func TestTXPayloadJSONExact(t *testing.T) {
+	raw, err := (TXFrame{Value: 1714739, Protocol: 1, Length: 24, Repeat: 5}).marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	const want = `{"value":1714739,"protocol":1,"length":24,"repeat":5}`
+	if string(raw) != want {
+		t.Fatalf("payload = %s, want %s", raw, want)
+	}
+}
+
+func TestValidateRFParams(t *testing.T) {
+	if err := validateRFParams(1714739, 1, 24); err != nil {
+		t.Fatalf("valid params rejected: %v", err)
+	}
+	cases := []struct {
+		value    uint64
+		protocol int
+		length   int
+	}{
+		{1714739, 0, 24},
+		{1714739, 1, 0},
+		{1714739, 1, 33},
+		{1 << 24, 1, 24},
+	}
+	for _, tc := range cases {
+		if err := validateRFParams(tc.value, tc.protocol, tc.length); err == nil {
+			t.Errorf("validateRFParams(%d,%d,%d) unexpectedly succeeded", tc.value, tc.protocol, tc.length)
+		}
+	}
+}
+
 func TestParseTXCommandDefaultsRepeat(t *testing.T) {
 	cmd, err := parseTXCommand([]byte(`{"value":42}`))
 	if err != nil {
@@ -53,6 +85,10 @@ func TestParseTXCommandDefaultsRepeat(t *testing.T) {
 	}
 	if got := cmd.repeatCount(); got != 1 {
 		t.Fatalf("repeatCount() = %d, want 1", got)
+	}
+	frame := cmd.frame()
+	if frame.Value != 42 || frame.Protocol != 1 || frame.Length != 24 || frame.Repeat != 1 {
+		t.Fatalf("frame defaults = %#v", frame)
 	}
 }
 

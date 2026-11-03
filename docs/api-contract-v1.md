@@ -1820,7 +1820,11 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
   `value/protocol/length`。服务端不能要求网关“进入学习模式”，除非使用
   自定义固件扩展（v1 不依赖）。
 - 315MHz 单向；命令确认是 best-effort，捕获缺失不判失败。
-- mock 不会把服务端 TX 回显到 `315toMQTT`；这是预期行为。
+- mock 默认不会把服务端 TX 回显到 `315toMQTT`；这是预期行为。
+  仅在测试命令确认路径时可用 `-tx-echo` / `MOCK_TX_ECHO=true` 显式开启。
+- mock 的 `POST /mock/transmit` 与 CLI `send` 只模拟 ESP32 发射，不发布 MQTT；
+  `POST /mock/press-button` 的 `frames` / `interval_ms` 与 CLI `burst` 用于模拟
+  一次物理按键产生的多帧 RX。
 - 接收器可用性在 v1 由“是否观察到捕获”推断；`unknown` 不等于故障，
   只有明确 `unavailable` 或采集窗口零捕获时才提示排查。
 
@@ -1829,8 +1833,11 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - `rand`：模拟未知遥控器，产生新的 24 位码；学习时同一码需要执行 3 次
   （每次间隔 ≥600ms），服务端才会把它判为候选。
 - `on 1` / `off 1`：模拟已知设备的开/关码；用于控制/冲突测试。
-- `press <code>`：发送任意 24 位码；学习时同样需要同一码 3 次。
-- 以上命令通过 mock 的“虚拟天线”发布 `315toMQTT`，
+- `press <code>`：发送任意 24 位单帧码；学习时同样需要同一码 3 次。
+- `burst <code> [frames]`：模拟一次按键产生的多帧 RX（默认 3 帧、间隔 80ms），
+  用于验证服务端把 400ms 内的同码帧合并为一次按键。
+- `send <code> [repeat]`：模拟 ESP32 发射侧；不发布捕获，不推进学习。
+- 以上 RX 命令通过 mock 的“虚拟天线”发布 `315toMQTT`，
   等价于真实网关接收器收到信号；它们不是服务端直接注入捕获。
 - 若 mock 一次命令只发布一帧，学习 UI 会显示 `1/3`；连续执行 3 次才达标。
   真实网关可能一次按键发多帧，服务端会把 400ms 内的同码帧合并为一次按键。

@@ -121,6 +121,31 @@ printf '%s' "$response" | grep -q '"delay":330' || fail "press-button 响应缺�
 wait_log "$SUB" "$PREFIX/315toMQTT {\"value\":1714739,\"protocol\":1,\"length\":24,\"delay\":330}" \
   || fail "订阅者未收到 315toMQTT"
 
+info "2b) HTTP transmit，校验 TX 不发布 RX 且计数累加"
+response="$(curl -sf -X POST "$BASE/mock/transmit" \
+  -H 'Content-Type: application/json' -d '{"code":1714739,"repeat":5}')"
+printf '%s\n' "$response"
+printf '%s' "$response" | grep -q '"repeat":5' || fail "transmit 响应缺少 repeat=5"
+status="$(curl -sf "$BASE/mock/status")"
+printf '%s\n' "$status"
+printf '%s' "$status" | grep -q '"rx_frames":1' || fail "transmit 不应增加 rx_frames（期望 1）"
+printf '%s' "$status" | grep -q '"tx_frames":10' || fail "tx_frames 期望 10（MQTT 5 + HTTP 5）"
+
+info "2c) HTTP 多帧 RX，校验一次按键的连发帧"
+response="$(curl -sf -X POST "$BASE/mock/press-button" \
+  -H 'Content-Type: application/json' -d '{"code":1714739,"frames":3,"interval_ms":80}')"
+printf '%s\n' "$response"
+printf '%s' "$response" | grep -q '"frames":3' || fail "press-button 响应缺少 frames=3"
+burst_ok=0
+for _ in $(seq 1 10); do
+  if curl -sf "$BASE/mock/status" | grep -q '"rx_frames":4'; then
+    burst_ok=1
+    break
+  fi
+  sleep 0.3
+done
+[ "$burst_ok" -eq 1 ] || fail "多帧 RX 后 rx_frames 期望 4"
+
 info "3) HTTP kill，校验 LWT=offline 与断电后 503"
 curl -sf -X POST "$BASE/mock/kill" >/dev/null
 wait_retained "$PREFIX/LWT" offline || fail "kill 后 retained LWT 不是 offline"
@@ -141,7 +166,7 @@ done
 [ "$booted" -eq 1 ] || fail "boot 后 MQTT 未恢复连接"
 wait_retained "$PREFIX/LWT" online || fail "boot 后 retained LWT 不是 online"
 
-info "5) CLI on 1 / off 1 / rand，校验抓码日志"
+info "5) CLI on 1 / off 1 / rand / burst / send，校验日志"
 docker rm -f "$MOCK" >/dev/null 2>&1 || true
 (
   sleep 3
@@ -150,6 +175,10 @@ docker rm -f "$MOCK" >/dev/null 2>&1 || true
   echo 'off 1'
   sleep 1
   echo 'rand'
+  sleep 1
+  echo 'burst 1714739 3'
+  sleep 1
+  echo 'send 1714740 2'
   sleep 1
   echo 'quit'
 ) | docker run --rm -i --network "$NET" -e MQTT_URL="tcp://$EMQX:1883" "$IMAGE" >"$TMP/cli.log" 2>&1 || true
@@ -160,6 +189,10 @@ grep -qF '[315M RX] 模拟按下 1号设备 关: Value=1714740' "$TMP/cli.log" \
   || fail "CLI off 1 日志缺失"
 grep -qF '模拟按下未知遥控器' "$TMP/cli.log" \
   || fail "CLI rand 日志缺失"
+grep -qF '[315M RX] 模拟接收遥控器码 0x1A2A33 的连发帧: Value=1714739 (HEX: 0x1A2A33), frames=3' "$TMP/cli.log" \
+  || fail "CLI burst 日志缺失"
+grep -qF '[315M TX] 来源: CLI send' "$TMP/cli.log" \
+  || fail "CLI send 日志缺失"
 wait_retained "$PREFIX/LWT" offline || fail "CLI 正常退出后 retained LWT 不是 offline"
 
 info "全部通过 ✅"

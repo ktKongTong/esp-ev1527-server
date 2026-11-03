@@ -4,8 +4,9 @@
 让后端、Compose/前端、自动化测试都可以按最终 MQTT 契约联调。
 
 - 固定的 ClientID、LWT、版本、命令订阅、抓码上报主题
-- 控制台 CLI：`on 1` / `off 1` / `rand` / `kill` / `boot`
-- 轻量 HTTP 控制接口：`POST /mock/press-button`
+- 双向射频仿真：RX 支持单帧/多帧按键，TX 支持模拟 ESP32 发射与可选回显
+- 控制台 CLI：`on 1` / `off 1` / `rand` / `press` / `burst` / `send` / `kill` / `boot`
+- 轻量 HTTP 控制接口：`POST /mock/press-button`（RX）、`POST /mock/transmit`（TX）
 - `kill` 不发送 MQTT `DISCONNECT`，直接切断 TCP，真实触发 Broker 的遗嘱消息
 - Broker 断线自动重连；`kill` 后保持“断电”状态，`boot` 后重新上线
 - 单文件二进制，无 CGO，附带 Dockerfile / Compose / 单元测试 / 冒烟测试
@@ -28,8 +29,11 @@
 - 默认 Broker：`tcp://localhost:1883`
 - MQTT 协议：3.1.1（paho 默认，支持 3.1 回退）
 - 启动顺序：连接 → 订阅命令主题 → 发布 retained `version` → 发布 retained `online`
-- 收到发射指令时只打印控制台日志，**不会**把该指令回显到 `315toMQTT`（避免业务端出现回环/重复状态）
-- 只有 `on 1` / `off 1` / `rand` / HTTP 按键才会产生 `315toMQTT` 抓码事件
+- 收到发射指令时只打印控制台日志，**默认不会**把该指令回显到 `315toMQTT`（避免业务端出现回环/重复状态）
+- 需要联调服务端“命令 2 秒内收到同码捕获 → confirmed”路径时，可显式开启
+  `-tx-echo` / `MOCK_TX_ECHO=true`；该选项只用于测试，默认关闭
+- 只有 `on 1` / `off 1` / `rand` / `press` / `burst` / HTTP 按键才会产生
+  `315toMQTT` 抓码事件；`send` 只模拟 ESP32 发射
 
 ### ⚠️ 关于示例中的 HEX
 
@@ -111,6 +115,7 @@ go build -trimpath -o omg315-mock .
 | `-topic-prefix` | `OMG_TOPIC_PREFIX` | `home/OpenMQTTGateway` | 并行测试时可加前缀 |
 | `-connect-timeout` | — | `5s` | 单次连接超时 |
 | `-keepalive` | — | `30s` | MQTT KeepAlive |
+| `-tx-echo` | `MOCK_TX_ECHO` | `false` | 收到 MQTT 发射指令后模拟接收器回显一次捕获；仅用于测试命令确认路径 |
 
 示例：
 
@@ -133,7 +138,9 @@ go run .
 | `off 1` | 模拟按下 1 号设备“关”，发布 `value=1714740` |
 | `on` / `off` | 省略设备号时默认 1 号 |
 | `rand` | 生成随机 24 位新码，模拟未知遥控器配对 |
-| `press <code>` | 扩展指令：发送任意 24 位码（支持 `0x` 前缀） |
+| `press <code>` | 单帧 RX：发送任意 24 位码（支持 `0x` 前缀） |
+| `burst <code> [frames]` | 多帧 RX：模拟一次物理按键产生的重复帧，默认 3 帧、间隔 80ms |
+| `send <code> [repeat]` | 模拟 ESP32 发射 315M 码，默认重放 5 次；只打印 TX，不发布 MQTT |
 | `kill` | 模拟 ESP32 意外掉电：不发送 `DISCONNECT`，强制关闭 TCP，触发 LWT=`offline` |
 | `boot` | 扩展指令：`kill` 之后重新上电并连接 Broker |
 | `status` | 查看电源、MQTT 连接、主题、运行时长 |
@@ -154,6 +161,20 @@ CLI 输入 `on 1`：
 ```text
 [315M RX] 模拟按下 1号设备 开: Value=1714739 (HEX: 0x1A2A33), delay=330ms
 [MQTT] -> home/OpenMQTTGateway/315toMQTT {"value":1714739,"protocol":1,"length":24,"delay":330}
+```
+
+CLI 输入 `burst 1714739 3`：
+
+```text
+[315M RX] 模拟接收遥控器码 0x1A2A33 的连发帧: Value=1714739 (HEX: 0x1A2A33), frames=3, interval=80ms, delay=330ms
+[MQTT] -> home/OpenMQTTGateway/315toMQTT {"value":1714739,"protocol":1,"length":24,"delay":330}
+```
+
+CLI 输入 `send 1714739 5`：
+
+```text
+[315M TX] 模拟天线发射: Value=1714739 (HEX: 0x1A2A33), 重放=5次
+[315M TX] 来源: CLI send
 ```
 
 CLI 输入 `kill`：
@@ -191,20 +212,65 @@ curl -X POST http://localhost:8099/mock/press-button \
     "length": 24,
     "delay": 330
   },
-  "hex": "0x1A2A33"
+  "hex": "0x1A2A33",
+  "frames": 1,
+  "interval_ms": 0
 }
 ```
 
 - `code` 必须是 24 位整数：`0..16777215`
+- `frames`（可选，`1..20`）模拟一次物理按键产生的多帧 RX；默认 `1`
+- `interval_ms`（可选，`0..1000`）是帧间隔；多帧且省略时默认 `80`
+- 多帧总时长不能超过 `3000ms`
 - 网关断电（`kill` 后）返回 `503`，MQTT 未连接同样返回 `503`
 - 请求体非法/缺字段/超范围返回 `400`
+
+示例：模拟一次按键产生 3 个重复帧（服务端学习时应计为 `1/3`，不是 `3/3`）：
+
+```bash
+curl -X POST http://localhost:8099/mock/press-button \
+  -H 'Content-Type: application/json' \
+  -d '{"code":1714739,"frames":3,"interval_ms":80}'
+```
+
+### `POST /mock/transmit`（模拟 ESP32 发射）
+
+不经过 MQTT，直接触发模拟器的“天线发射”路径，用于测试 ESP32 发送侧和自动化脚本。
+
+```bash
+curl -X POST http://localhost:8099/mock/transmit \
+  -H 'Content-Type: application/json' \
+  -d '{"code":1714739,"protocol":1,"length":24,"repeat":5}'
+```
+
+响应：
+
+```json
+{
+  "ok": true,
+  "payload": {
+    "value": 1714739,
+    "protocol": 1,
+    "length": 24,
+    "repeat": 5
+  },
+  "hex": "0x1A2A33"
+}
+```
+
+- `protocol` / `length` 省略时默认 `1` / `24`；`repeat` 省略时默认 `5`
+- `repeat` 范围 `1..50`
+- 发射**不会**自动发布 `315toMQTT`；需要回显时用 MQTT 路径并开启 `-tx-echo`
+- 网关断电时返回 `503`
 
 ### 扩展接口
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/mock/health` | 存活与 MQTT 连接状态 |
-| `GET` | `/mock/status` | 完整状态（ClientID、Broker、主题、运行时长） |
+| `GET` | `/mock/status` | 完整状态（ClientID、Broker、主题、运行时长、RX/TX 帧计数、最近码） |
+| `POST` | `/mock/press-button` | 模拟 RX（支持 `frames` / `interval_ms`） |
+| `POST` | `/mock/transmit` | 模拟 TX（不发布 MQTT） |
 | `POST` | `/mock/kill` | 等价 CLI `kill`，用于自动化验证 LWT |
 | `POST` | `/mock/boot` | 等价 CLI `boot` |
 

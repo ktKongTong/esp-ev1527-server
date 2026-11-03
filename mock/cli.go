@@ -96,6 +96,50 @@ func handleCLICommand(line string, gw *Gateway, log *Logger, cancel context.Canc
 			log.Printf("[CLI] press 失败: %v", err)
 		}
 
+	case "burst":
+		if len(fields) < 2 || len(fields) > 3 {
+			log.Printf("[CLI] 用法: burst <code> [frames]，例如 burst 1714739 3")
+			return false
+		}
+		code, err := strconv.ParseUint(fields[1], 0, 64)
+		if err != nil {
+			log.Printf("[CLI] 无效的 code %q", fields[1])
+			return false
+		}
+		frames := 3
+		if len(fields) == 3 {
+			frames, err = strconv.Atoi(fields[2])
+			if err != nil || frames < 1 || frames > rfMaxPressFrames {
+				log.Printf("[CLI] frames 必须是 1-%d 的整数", rfMaxPressFrames)
+				return false
+			}
+		}
+		if _, err := gw.PressBurst(code, fmt.Sprintf("模拟接收遥控器码 %s 的连发帧", formatHex(code)), frames, 80*time.Millisecond); err != nil {
+			log.Printf("[CLI] burst 失败: %v", err)
+		}
+
+	case "send":
+		if len(fields) < 2 || len(fields) > 3 {
+			log.Printf("[CLI] 用法: send <code> [repeat]，例如 send 1714739 5")
+			return false
+		}
+		code, err := strconv.ParseUint(fields[1], 0, 64)
+		if err != nil {
+			log.Printf("[CLI] 无效的 code %q", fields[1])
+			return false
+		}
+		repeat := 5
+		if len(fields) == 3 {
+			repeat, err = strconv.Atoi(fields[2])
+			if err != nil || repeat < 1 || repeat > rfMaxRepeat {
+				log.Printf("[CLI] repeat 必须是 1-%d 的整数", rfMaxRepeat)
+				return false
+			}
+		}
+		if _, err := gw.TransmitCode(code, rfProtocol, rfBitLength, repeat, "CLI send"); err != nil {
+			log.Printf("[CLI] send 失败: %v", err)
+		}
+
 	case "kill":
 		if len(fields) > 1 {
 			log.Printf("[CLI] 用法: kill")
@@ -150,7 +194,9 @@ func printCLIHelp(log *Logger) {
 	log.Printf("  on [n]        模拟按下 n 号设备“开”（默认 1，发码 1714739）")
 	log.Printf("  off [n]       模拟按下 n 号设备“关”（默认 1，发码 1714740）")
 	log.Printf("  rand          模拟按下未知新遥控器（随机 24 位码，用于配对测试）")
-	log.Printf("  press <code>  发送任意 24 位遥控码，支持十进制或 0x 十六进制（扩展指令）")
+	log.Printf("  press <code>  发送任意 24 位遥控码，支持十进制或 0x 十六进制（单帧 RX）")
+	log.Printf("  burst <code> [frames]  模拟一次物理按键产生的多帧 RX（默认 3 帧，间隔 80ms）")
+	log.Printf("  send <code> [repeat]   模拟 ESP32 发射 315M 码（默认重放 5 次，不发布 MQTT）")
 	log.Printf("  kill          模拟 ESP32 意外掉电（不发送 DISCONNECT，触发 LWT=offline）")
 	log.Printf("  boot          模拟重新上电并连接 Broker（kill 之后使用，扩展指令）")
 	log.Printf("  status        查看电源、MQTT 连接与主题信息")

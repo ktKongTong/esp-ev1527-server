@@ -27,6 +27,7 @@ type Config struct {
 	TopicPrefix    string
 	ConnectTimeout time.Duration
 	KeepAlive      time.Duration
+	TXEcho         bool
 }
 
 // Topics derives the OpenMQTTGateway topic set from the configured prefix.
@@ -62,6 +63,7 @@ func loadConfig() Config {
 		TopicPrefix:    envOr("OMG_TOPIC_PREFIX", defaultTopicPrefix),
 		ConnectTimeout: 5 * time.Second,
 		KeepAlive:      30 * time.Second,
+		TXEcho:         envBool("MOCK_TX_ECHO", false),
 	}
 
 	flag.StringVar(&cfg.MQTTURL, "mqtt", cfg.MQTTURL, "MQTT Broker URL，例如 tcp://localhost:1883（环境变量 MQTT_URL）")
@@ -72,6 +74,7 @@ func loadConfig() Config {
 	flag.StringVar(&cfg.TopicPrefix, "topic-prefix", cfg.TopicPrefix, "MQTT 主题前缀（环境变量 OMG_TOPIC_PREFIX）")
 	flag.DurationVar(&cfg.ConnectTimeout, "connect-timeout", cfg.ConnectTimeout, "MQTT 连接超时")
 	flag.DurationVar(&cfg.KeepAlive, "keepalive", cfg.KeepAlive, "MQTT KeepAlive 间隔")
+	flag.BoolVar(&cfg.TXEcho, "tx-echo", cfg.TXEcho, "收到 MQTT 发射指令后模拟接收器回显一次捕获（默认 false，仅用于测试）")
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "OpenMQTTGateway 315MHz 高保真模拟器\n\n用法: %s [选项]\n\n选项:\n", os.Args[0])
 		flag.PrintDefaults()
@@ -97,6 +100,18 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(v)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func normalizeHTTPAddr(addr string) string {
