@@ -11,9 +11,7 @@ import (
 
 // gatewayAPI keeps the HTTP layer testable without a live broker.
 type gatewayAPI interface {
-	PressCode(code uint64, label string) (RFCode, error)
 	PressBurst(code uint64, label string, frames int, interval time.Duration) (RFCode, error)
-	TransmitCode(value uint64, protocol, length, repeat int, label string) (TXFrame, error)
 	Kill() error
 	Boot() error
 	Status() Status
@@ -37,7 +35,6 @@ func (h *HTTPServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", h.handleRoot)
 	mux.HandleFunc("/mock/press-button", h.handlePressButton)
-	mux.HandleFunc("/mock/transmit", h.handleTransmit)
 	mux.HandleFunc("/mock/health", h.handleHealth)
 	mux.HandleFunc("/mock/status", h.handleStatus)
 	mux.HandleFunc("/mock/kill", h.handleKill)
@@ -57,7 +54,6 @@ func (h *HTTPServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	fmt.Fprint(w, "OpenMQTTGateway 315MHz Mock\n\n")
 	fmt.Fprint(w, "POST /mock/press-button  {\"code\":1714739,\"frames\":1}\n")
-	fmt.Fprint(w, "POST /mock/transmit      {\"code\":1714739,\"repeat\":5}\n")
 	fmt.Fprint(w, "GET  /mock/health\n")
 	fmt.Fprint(w, "GET  /mock/status\n")
 	fmt.Fprint(w, "POST /mock/kill\n")
@@ -149,76 +145,6 @@ func (h *HTTPServer) handlePressButton(w http.ResponseWriter, r *http.Request) {
 		Hex:        formatHex(code),
 		Frames:     frames,
 		IntervalMS: intervalMS,
-	})
-}
-
-type transmitRequest struct {
-	Code     *uint64 `json:"code"`
-	Protocol *int    `json:"protocol"`
-	Length   *int    `json:"length"`
-	Repeat   *int    `json:"repeat"`
-}
-
-type transmitResponse struct {
-	OK      bool    `json:"ok"`
-	Payload TXFrame `json:"payload"`
-	Hex     string  `json:"hex"`
-}
-
-func (h *HTTPServer) handleTransmit(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w, http.MethodPost)
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	defer r.Body.Close()
-
-	var req transmitRequest
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, `请求体必须是 JSON，例如 {"code":1714739,"repeat":5}: `+err.Error())
-		return
-	}
-	if err := dec.Decode(&struct{}{}); err != io.EOF {
-		writeError(w, http.StatusBadRequest, "请求体只能包含一个 JSON 对象")
-		return
-	}
-	if req.Code == nil {
-		writeError(w, http.StatusBadRequest, "缺少 code 字段")
-		return
-	}
-
-	protocol, length, repeat := rfProtocol, rfBitLength, 5
-	if req.Protocol != nil {
-		protocol = *req.Protocol
-	}
-	if req.Length != nil {
-		length = *req.Length
-	}
-	if req.Repeat != nil {
-		repeat = *req.Repeat
-	}
-	if err := validateRFParams(*req.Code, protocol, length); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if repeat < 1 || repeat > rfMaxRepeat {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("repeat 必须在 1-%d 之间", rfMaxRepeat))
-		return
-	}
-
-	frame, err := h.gw.TransmitCode(*req.Code, protocol, length, repeat, "HTTP /mock/transmit")
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
-		return
-	}
-
-	h.log.Printf("[HTTP] POST /mock/transmit code=%d (HEX: %s) repeat=%d", *req.Code, formatHex(*req.Code), repeat)
-	writeJSON(w, http.StatusOK, transmitResponse{
-		OK:      true,
-		Payload: frame,
-		Hex:     formatHex(frame.Value),
 	})
 }
 

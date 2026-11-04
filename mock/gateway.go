@@ -257,30 +257,44 @@ func (g *Gateway) startSession(s *mqttSession) error {
 	}
 	g.log.Printf("[MQTT] 已订阅命令: %s (QoS 1)", g.topics.Command)
 
-	if err := g.publish(s, g.topics.Version, []byte(gatewayVersion), true); err != nil {
+	if err := g.publish(s, g.topics.Version, []byte(gatewayVersion), 1, true, 3*time.Second); err != nil {
 		return fmt.Errorf("发布 version 失败: %w", err)
 	}
-	g.log.Printf("[MQTT] -> %s = %q (retained)", g.topics.Version, gatewayVersion)
 
-	if err := g.publish(s, g.topics.LWT, []byte("online"), true); err != nil {
+	if err := g.publish(s, g.topics.LWT, []byte("online"), 1, true, 3*time.Second); err != nil {
 		return fmt.Errorf("发布 online 失败: %w", err)
 	}
-	g.log.Printf("[MQTT] -> %s = %q (retained, LWT)", g.topics.LWT, "online")
 	return nil
 }
 
-func (g *Gateway) publish(s *mqttSession, topic string, payload []byte, retain bool) error {
-	tok := s.client.Publish(topic, 1, retain, payload)
-	if !tok.WaitTimeout(3 * time.Second) {
+// publish sends one MQTT message and logs it after the broker acknowledges it.
+func (g *Gateway) publish(
+	s *mqttSession,
+	topic string,
+	payload []byte,
+	qos byte,
+	retain bool,
+	timeout time.Duration,
+) error {
+	tok := s.client.Publish(topic, qos, retain, payload)
+	if !tok.WaitTimeout(timeout) {
 		return errors.New("发布超时")
 	}
-	return tok.Error()
+	if err := tok.Error(); err != nil {
+		return err
+	}
+	g.logTx(topic, payload, qos, retain)
+	return nil
+}
+
+func (g *Gateway) logTx(topic string, payload []byte, qos byte, retain bool) {
+	g.log.Printf("[MQTT TX] topic=%s payload=%s qos=%d retain=%t", topic, payload, qos, retain)
 }
 
 // handleTXCommand is the server -> gateway RF transmit path.
 func (g *Gateway) handleTXCommand(_ mqtt.Client, msg mqtt.Message) {
 	raw := msg.Payload()
-	g.log.Printf("[MQTT] <- %s %s", msg.Topic(), string(raw))
+	g.log.Printf("[MQTT RX] topic=%s payload=%s", msg.Topic(), string(raw))
 
 	cmd, err := parseTXCommand(raw)
 	if err != nil {
@@ -368,15 +382,7 @@ func (g *Gateway) PressBurst(code uint64, label string, frames int, interval tim
 		g.log.Printf("[315M RX] %s: Value=%d (HEX: %s), frames=%d, interval=%s, delay=%dms",
 			label, code, formatHex(code), frames, interval, rfReceiveDelayMS)
 	}
-	raw, _ := payload.marshal()
-	g.log.Printf("[MQTT] -> %s %s", g.topics.RX, string(raw))
 	return payload, nil
-}
-
-// PressCode is the single-frame convenience form used by the CLI and the
-// original HTTP endpoint.
-func (g *Gateway) PressCode(code uint64, label string) (RFCode, error) {
-	return g.PressBurst(code, label, 1, 0)
 }
 
 // publishCapture publishes one RX frame and records it only after the broker
@@ -407,6 +413,7 @@ func (g *Gateway) publishCapture(payload RFCode) error {
 	if err := tok.Error(); err != nil {
 		return err
 	}
+	g.logTx(g.topics.RX, raw, rfQoS, false)
 
 	g.mu.Lock()
 	g.rxFrames++
@@ -496,9 +503,7 @@ func (g *Gateway) gracefulClose(s *mqttSession) {
 		return
 	}
 	if s.client.IsConnected() {
-		tok := s.client.Publish(g.topics.LWT, 1, true, []byte("offline"))
-		ok := tok.WaitTimeout(2 * time.Second)
-		if ok && tok.Error() == nil {
+		if err := g.publish(s, g.topics.LWT, []byte("offline"), 1, true, 2*time.Second); err == nil {
 			s.client.Disconnect(250)
 			g.log.Printf("[MQTT] 已发布 retained offline 并正常断开")
 			return

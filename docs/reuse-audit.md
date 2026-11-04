@@ -10,7 +10,7 @@
 | 现有实现 | 能力 | 判定 | 处理 |
 | --- | --- | --- | --- |
 | `server/.../ControlPlane.kt` | 设备/命令/学习状态机、码归属 | 产品领域逻辑；单对象职责过载 | 删除 God object；状态机原样拆到 `DeviceService` / `CommandService` / `LearningService` / `GatewayIngest` |
-| `server/.../MqttClient.kt` | 手写 MQTT 3.1.1 连接、订阅、发布 | 成熟库已覆盖 | 删除；改用 ktor-mqtt 1.2.0 薄适配层 `mqtt/MqttTransport.kt` |
+| `server/.../MqttClient.kt` | 手写 MQTT 3.1.1 连接、订阅、发布 | 成熟库已覆盖 | 删除；改用 ktor-mqtt 1.2.2 薄适配层 `mqtt/MqttTransport.kt` |
 | `server/.../Main.kt` SSE 路由 | SSE 分帧、心跳、重放 | 需求已移除 | 删除 SSE 插件、`/events` 路由与事件 DTO |
 | `server/.../SseHub.kt` | 事件扇出、256 条重放、`Last-Event-ID` | 需求已移除 | 删除 |
 | `server/.../ControlPlane.kt` 的抓码解析 | 网关 RF payload 解码 | `ContractJson` + DTO 已覆盖 | 保留在 `mqtt/GatewayIngest.kt`，不手写 JSON |
@@ -30,15 +30,17 @@
 
 ## 2. MQTT 库选择
 
-### 2.1 采用：ktor-mqtt 1.2.0
+### 2.1 采用：ktor-mqtt 1.2.2
 
-- 坐标：`dev.koft.ktor-mqtt:mqtt-client:1.2.0` +
-  `dev.koft.ktor-mqtt:mqtt-core:1.2.0`
-- 来源：`https://github.com/ktKongTong/ktor-mqtt/` 的 `1.2.0` 构建，
+- 坐标：`dev.koft.ktor-mqtt:mqtt-client:1.2.2` +
+  `dev.koft.ktor-mqtt:mqtt-core:1.2.2`
+- 来源：`https://github.com/ktKongTong/ktor-mqtt/` 的 `v1.2.2` 构建，
   发布到 GitHub Packages。
 - 许可证：Apache-2.0（POM 中声明）。
-- 目标：`linuxArm64`（另有 Apple 目标）；**不发布 `linuxX64`**。
-  因此 `server` 只保留 `linuxArm64` 目标。
+- 目标：`linuxArm64` + `linuxX64` + `macosArm64`。Linux 与 macOS
+  变体都由 fork 发布。
+- 依赖声明：放在 `nativeMain`。`nativeMain` 源码直接导入 ktor-mqtt 类型；
+  声明在叶子 source set 时编译器可解析，但共享源集与 IDE 分析看不到。
 - 覆盖：MQTT 5 连接、订阅、QoS 1 发布、keepalive、`publishedPackets` 流、
   `connectionState` 流。
 - 复用方式：`mqtt/MqttTransport.kt` 只保留库未提供的行为：
@@ -51,6 +53,13 @@
 MQTT 是服务端必需配置：未设置 `MQTT_HOST` 时启动失败，不保留无网关的
 `UnavailableRfTransmitter` 之类的降级实现。
 
+TLS 走 MQTT over WebSocket Secure（`MQTT_TRANSPORT=websocket` +
+`MQTT_TLS=true`）。Ktor Native 的 `ktor-network-tls` 至今没有裸 TLS 实现
+（`openTLSSession` 直接 `error`），而 Ktor Curl 引擎的 klib 自带静态
+libcurl + OpenSSL，并支持 WebSocket 与 TLS，Linux/macOS 目标均可链接。
+fork 未发布 `mqtt-client-ws`，因此服务端保留一个薄 WebSocket 传输层，
+见第 4 节。
+
 ### 2.2 未采用
 
 | 库 | 原因 |
@@ -58,7 +67,7 @@ MQTT 是服务端必需配置：未设置 `MQTT_HOST` 时启动失败，不保�
 | KMQTT 1.0.0 | 只支持 MQTT 3.1.1；本版要求改用 ktor-mqtt。作为历史实现已删除，不保留平行适配层 |
 | `com.ditchoom:mqtt-client:2.1.1` | Linux 实现依赖 io_uring；Docker 默认 seccomp 下初始化失败：`Failed to initialize io_uring: Operation not permitted` |
 | `org.meshtastic:mqtt-client:0.3.8` | GPL-3.0，与仓库分发约束不匹配 |
-| 上游 `de.kempmobil.ktor-mqtt` | 不发布 `linuxArm64` 原生目标 |
+| 上游 `de.kempmobil.ktor-mqtt` 1.2.2 | 不发布 `linuxArm64` 原生目标；fork 已同时发布 Linux 与 macOS 变体，无需再混用上游坐标 |
 
 ## 3. 持久化选型
 
@@ -90,6 +99,20 @@ Ktor 的 `CallId` 只解决请求 ID；本插件还需要：
 ktor-mqtt 暴露连接状态和收发原语，但不自动重连。重连策略是部署需求
 （Broker 重启时进程必须存活），不是协议实现，因此保留在薄适配层。
 
+### `WebSocketMqttEngine`
+
+```
+Reused: ktor-mqtt `mqtt-client` packet codec (`ByteReadChannel.readPacket`,
+        `Sink.write`) + Ktor Curl engine (`ktor-client-curl` 3.6.1)
+Not reused because: ktor-mqtt's `mqtt-client-ws` is not published for
+        linuxArm64/linuxX64/macosArm64, and Ktor Native has no raw TLS
+New implementation scope: WebSocket frame loop adapted from the Apache-2.0
+        `WebSocketEngine` in ktor-mqtt's `mqtt-client-ws`
+```
+
+它不解析或生成 MQTT 报文，只负责 WebSocket 连接、二进制帧与字节流转换。
+上游 `WebSocketEngine` 是 `internal` 且没有对应制品，无法直接复用。
+
 ### `newId` / `newIdempotencyKey`
 
 两处都是标准库 `Random` 的几行封装，格式与命名空间不同：
@@ -110,7 +133,8 @@ v1.2.0 不提供事件流，客户端用 HTTP 轮询刷新快照。
 | 依赖 | 维护/平台 | 许可证 | 运行时代价 | 结论 |
 | --- | --- | --- | --- | --- |
 | Ktor 3.6.1 | 活跃；server/client 均支持 `linuxArm64` 与 Wasm | Apache-2.0 | 已在技术栈内 | 采用 |
-| ktor-mqtt 1.2.0 | 活跃；`linuxArm64` | Apache-2.0 | 纯 Kotlin MQTT 5 客户端 | 采用 |
+| ktor-mqtt 1.2.2 | 活跃；`linuxArm64` / `linuxX64` / `macosArm64` | Apache-2.0 | 纯 Kotlin MQTT 5 客户端 | 采用 |
+| ktor-client-curl 3.6.1 | 活跃；Linux/macOS 原生目标 | Apache-2.0 | klib 自带静态 libcurl + OpenSSL；提供 TLS 与 WebSocket | 采用（仅为 MQTT over WSS） |
 | Room3 3.0.3 | AndroidX；KMP | Apache-2.0 | KSP 生成代码 + 运行时 | 采用 |
 | sqlite-bundled 2.7.1 | AndroidX；KMP | Apache-2.0 | 自带 SQLite 原生库 | 采用 |
 | kotlinx.serialization 1.11.0 | Kotlin 官方 | Apache-2.0 | 已有 | 采用 |
@@ -122,7 +146,9 @@ v1.2.0 不提供事件流，客户端用 HTTP 轮询刷新快照。
 
 本次迁移后实际执行：
 
-- `:server:linkDebugExecutableLinuxArm64` 通过（Room3 KSP + ktor-mqtt 链接）。
+- `:server:linkDebugExecutableLinuxArm64` 通过（Room3 KSP + ktor-mqtt + Curl 引擎链接）。
+- `:server:linkDebugExecutableMacosArm64` 通过；以 `wss://…:8084/mqtt`
+  连接 EMQX Cloud，CONNACK 成功并完成订阅，凭据未出现在日志中。
 - `:contract:testAndroidHostTest`、`:shared:compileKotlinWasmJs` 通过。
 - `:androidApp:assembleDebug`、`:webApp:wasmJsBrowserDistribution` 通过。
 - `mock/` 的 `go test ./...` 通过。

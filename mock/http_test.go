@@ -26,13 +26,6 @@ type fakeGateway struct {
 
 	burstFrames   int
 	burstInterval time.Duration
-	transmitCalls int
-	transmitFrame TXFrame
-	transmitErr   error
-}
-
-func (f *fakeGateway) PressCode(code uint64, label string) (RFCode, error) {
-	return f.PressBurst(code, label, 1, 0)
 }
 
 func (f *fakeGateway) PressBurst(code uint64, label string, frames int, interval time.Duration) (RFCode, error) {
@@ -48,15 +41,6 @@ func (f *fakeGateway) PressBurst(code uint64, label string, frames int, interval
 		f.pressPayload = newRFCode(code)
 	}
 	return f.pressPayload, nil
-}
-
-func (f *fakeGateway) TransmitCode(value uint64, protocol, length, repeat int, label string) (TXFrame, error) {
-	f.transmitCalls++
-	if f.transmitErr != nil {
-		return TXFrame{}, f.transmitErr
-	}
-	f.transmitFrame = TXFrame{Value: value, Protocol: protocol, Length: length, Repeat: repeat}
-	return f.transmitFrame, nil
 }
 
 func (f *fakeGateway) Kill() error {
@@ -163,75 +147,6 @@ func TestPressButtonRejectsInvalidBurst(t *testing.T) {
 	}
 	if f.pressCalls != 0 {
 		t.Fatalf("gateway should not be called, got %d calls", f.pressCalls)
-	}
-}
-
-func TestTransmitSuccess(t *testing.T) {
-	f := &fakeGateway{}
-	h := newTestHandler(f)
-
-	rr := doRequest(t, h, http.MethodPost, "/mock/transmit", `{"code":1714739,"repeat":5}`)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
-	}
-	if f.transmitCalls != 1 {
-		t.Fatalf("transmit calls = %d, want 1", f.transmitCalls)
-	}
-	want := TXFrame{Value: 1714739, Protocol: 1, Length: 24, Repeat: 5}
-	if f.transmitFrame != want {
-		t.Fatalf("frame = %#v, want %#v", f.transmitFrame, want)
-	}
-
-	var resp transmitResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if !resp.OK || resp.Hex != "0x1A2A33" || resp.Payload != want {
-		t.Fatalf("unexpected response: %#v", resp)
-	}
-}
-
-func TestTransmitBadRequests(t *testing.T) {
-	f := &fakeGateway{}
-	h := newTestHandler(f)
-
-	cases := []string{
-		``,
-		`not-json`,
-		`{}`,
-		`{"code":1,"repeat":0}`,
-		`{"code":1,"repeat":51}`,
-		`{"code":16777216}`,
-		`{"code":1,"length":0}`,
-		`{"code":2,"length":1}`,
-		`{"code":1}{"code":2}`,
-	}
-	for _, body := range cases {
-		rr := doRequest(t, h, http.MethodPost, "/mock/transmit", body)
-		if rr.Code != http.StatusBadRequest {
-			t.Errorf("body %q: status = %d, want 400 (response %s)", body, rr.Code, rr.Body.String())
-		}
-	}
-	if f.transmitCalls != 0 {
-		t.Fatalf("gateway should not be called, got %d calls", f.transmitCalls)
-	}
-}
-
-func TestTransmitOffline(t *testing.T) {
-	f := &fakeGateway{transmitErr: ErrPoweredOff}
-	h := newTestHandler(f)
-
-	rr := doRequest(t, h, http.MethodPost, "/mock/transmit", `{"code":1714739}`)
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", rr.Code)
-	}
-}
-
-func TestTransmitWrongMethod(t *testing.T) {
-	h := newTestHandler(&fakeGateway{})
-	rr := doRequest(t, h, http.MethodGet, "/mock/transmit", "")
-	if rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("status = %d, want 405", rr.Code)
 	}
 }
 

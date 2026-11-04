@@ -34,21 +34,32 @@ rg -n "require|replace" mock/go.mod
 | JSON 配置 | `ContractJson` | 统一使用，不新建第二套 `Json {}` |
 | 设备/命令/学习状态机 | `server/.../domain/` | 扩展对应领域服务；不在路由或客户端复制状态机，不重新合并成 God object |
 | 持久化 | `server/.../db/` + `server/.../data/` | Room3 entity/DAO 与仓储；领域服务不直接拼 SQL，不引入第二套 ORM |
-| MQTT 连接与发布 | `server/.../mqtt/MqttTransport.kt`（ktor-mqtt 1.2.0 薄适配层） | 扩展适配层；MQTT 协议、keepalive、QoS 1、订阅由 ktor-mqtt 负责，禁止再写第二套 MQTT 客户端 |
+| MQTT 连接与发布 | `server/.../mqtt/MqttTransport.kt`（ktor-mqtt 1.2.2 薄适配层） | 扩展适配层；MQTT 协议、keepalive、QoS 1、订阅由 ktor-mqtt 负责，禁止再写第二套 MQTT 客户端 |
 | 状态同步 | `shared/.../api/Esp32Api.kt` + `shared/.../App.kt` | v1.2.0 使用轮询；不新增事件流或客户端第二套状态机 |
 | 网关/设备/学习 UI | `shared/.../App.kt` | 复用现有页面、轮询与错误文案 |
 | OpenMQTTGateway 仿真 | `mock/` | 复用现有 CLI/HTTP 控制与 paho 客户端 |
 
 ### 1.3 已确定的复用决策
 
-- **MQTT**：使用 Apache-2.0 的 `dev.koft.ktor-mqtt:mqtt-client:1.2.0`
+- **MQTT**：使用 Apache-2.0 的 `dev.koft.ktor-mqtt:mqtt-client:1.2.2`
   （上游 `ktKongTong/ktor-mqtt`），支持 MQTT 5、QoS 1、订阅与 keepalive。
   `MqttTransport.kt` 只保留库未提供的行为：断线重连、Broker 断开时异常隔离、
   主题过滤和 `ByteArray` ↔ `ByteString` 边界转换。
+- **MQTT TLS**：Ktor Native 没有裸 TLS socket（`ktor-network-tls` 的
+  `openTLSSession` 直接 `error`）。需要 TLS 时使用 MQTT over WebSocket
+  Secure（`MQTT_TRANSPORT=websocket`、`MQTT_TLS=true`），传输由 Ktor
+  Curl 引擎完成；其 klib 自带静态 libcurl + OpenSSL。fork 未发布
+  `mqtt-client-ws`，`WebSocketMqttEngine` 只保留 WebSocket 帧循环，
+  MQTT 分帧仍复用 ktor-mqtt 的 `readPacket` / `write`。禁止恢复外部
+  TLS 代理脚本，也禁止在 TCP 模式下打开 `tls {}`。
 - **MQTT 为必需配置**：未设置 `MQTT_HOST` 时服务端拒绝启动；不实现
-  `UnavailableRfTransmitter` 之类的无网关降级路径。
-- **平台**：ktor-mqtt 只发布 `linuxArm64`，因此 `server` 只保留 `linuxArm64`
-  目标；不为了 `linuxX64` 再写一套 MQTT 实现。
+  `UnavailableRfTransmitter` 之类的无网关降级路径。配置可按
+  `环境变量 → CONFIG_FILE → .env → server/.env` 读取，环境变量优先。
+- **平台**：`server` 声明 `linuxArm64`（部署）、`linuxX64` 与 `macosArm64`
+  （本地运行与 IDE 调试）；ktor-mqtt 1.2.2 同时发布 Linux 与 macOS 变体。
+  MQTT 依赖统一放在 `nativeMain`，因为 `nativeMain` 源码直接导入其类型；
+  放到各目标 source set 会导致共享源集和 IDE 无法解析。Apple 目标在非
+  macOS 主机上由 Kotlin 自动禁用。
 - **未采用 DitchOoM MQTT**：其 Linux 实现依赖 io_uring；Docker 默认 seccomp
   返回 `Operation not permitted`，运行即崩溃。放宽容器 seccomp 的代价高于收益。
 - **未采用 Meshtastic MQTT**：许可证为 GPL-3.0，与仓库分发约束不匹配。
@@ -74,7 +85,7 @@ rg -n "require|replace" mock/go.mod
 ## 2. 依赖与平台约束
 
 - 新依赖统一登记在 `gradle/libs.versions.toml`，模块中通过 `libs.*` 引用。
-- `commonMain` 依赖必须同时支持 Android、`linuxArm64`、`wasmJs`；
+- `commonMain` 依赖必须同时支持 Android、`linuxArm64`、`macosArm64`、`wasmJs`；
   仅 Android/Web 可用的库放到对应 source set。
 - 不把 Ktor、Compose、MQTT 或 UI 依赖放进 `contract`。
 - `contract` 的 `commonMain` 只依赖序列化库，保持可被服务端和客户端共同消费。

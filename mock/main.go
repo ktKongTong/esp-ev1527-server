@@ -22,11 +22,9 @@ func main() {
 
 	gw := NewGateway(cfg, log)
 	var gatewayWG sync.WaitGroup
-	gatewayWG.Add(1)
-	go func() {
-		defer gatewayWG.Done()
+	gatewayWG.Go(func() {
 		gw.Run(ctx)
-	}()
+	})
 
 	var httpSrv *http.Server
 	if cfg.HTTPAddr != "" {
@@ -114,10 +112,8 @@ func printBanner(cfg Config, log *Logger) {
 		log.Printf(" HTTP 控制   : 已禁用")
 	}
 	log.Printf("------------------------------------------------------------")
-	log.Printf(" 终端指令    : on 1 | off 1 | rand | press <code> | burst <code> [frames] | send <code> [repeat] | kill | boot | status | help")
-	log.Printf(" 预置设备    : 1号设备 开=%d (%s) / 关=%d (%s)",
-		knownDevices[1].On, formatHex(knownDevices[1].On),
-		knownDevices[1].Off, formatHex(knownDevices[1].Off))
+	log.Printf(" 终端指令    : kill | boot | status | help | quit")
+	log.Printf(" RX 注入     : POST /mock/press-button {\"code\":1714739}（唯一入口）")
 	log.Printf("============================================================")
 }
 

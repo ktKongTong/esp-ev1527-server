@@ -23,9 +23,8 @@ kotlin {
     linuxX64()
     linuxArm64()
 
-    if (providers.gradleProperty("enableMacosServer").orNull == "true") {
-        macosArm64()
-    }
+    // Declared on all hosts; enabled only when the host can build Apple targets.
+    macosArm64()
 
     @OptIn(ExperimentalWasmDsl::class)
     wasmJs {

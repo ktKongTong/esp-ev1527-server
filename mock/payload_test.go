@@ -107,34 +107,3 @@ func TestParseTXCommandRejectsInvalid(t *testing.T) {
 		}
 	}
 }
-
-func TestRandomRFCodeIs24BitAndUnknown(t *testing.T) {
-	for i := 0; i < 200; i++ {
-		code, err := randomRFCode()
-		if err != nil {
-			t.Fatalf("randomRFCode: %v", err)
-		}
-		if code > rfMax24Bit {
-			t.Fatalf("code %d exceeds 24 bits", code)
-		}
-		if code == 0 {
-			t.Fatal("random code must not be zero")
-		}
-		if isKnownRFCode(code) {
-			t.Fatalf("random code %d collides with a predefined device", code)
-		}
-	}
-}
-
-func TestKnownDeviceMapping(t *testing.T) {
-	btn, ok := lookupDevice(1)
-	if !ok {
-		t.Fatal("device 1 must be predefined")
-	}
-	if btn.On != 1714739 || btn.Off != 1714740 {
-		t.Fatalf("device 1 codes = on:%d off:%d", btn.On, btn.Off)
-	}
-	if _, ok := lookupDevice(2); ok {
-		t.Fatal("device 2 must not be predefined")
-	}
-}

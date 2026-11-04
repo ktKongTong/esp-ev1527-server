@@ -5,8 +5,8 @@
 
 - 固定的 ClientID、LWT、版本、命令订阅、抓码上报主题
 - 双向射频仿真：RX 支持单帧/多帧按键，TX 模拟 ESP32 发射且不回显
-- 控制台 CLI：`on 1` / `off 1` / `rand` / `press` / `burst` / `send` / `kill` / `boot`
-- 轻量 HTTP 控制接口：`POST /mock/press-button`（RX）、`POST /mock/transmit`（TX）
+- 控制台 CLI：`kill` / `boot` / `status` / `help` / `quit`（仅生命周期控制）
+- 轻量 HTTP 控制接口：`POST /mock/press-button`（唯一的 RX 注入入口）
 - `kill` 不发送 MQTT `DISCONNECT`，直接切断 TCP，真实触发 Broker 的遗嘱消息
 - Broker 断线自动重连；`kill` 后保持“断电”状态，`boot` 后重新上线
 - 单文件二进制，无 CGO，附带 Dockerfile / Compose / 单元测试 / 冒烟测试
@@ -30,8 +30,7 @@
 - MQTT 协议：3.1.1（paho 默认，支持 3.1 回退）
 - 启动顺序：连接 → 订阅命令主题 → 发布 retained `version` → 发布 retained `online`
 - 收到发射指令时只打印控制台日志，**不会**把该指令回显到 `315toMQTT`（符合真实网关行为）
-- 只有 `on 1` / `off 1` / `rand` / `press` / `burst` / HTTP 按键才会产生
-  `315toMQTT` 抓码事件；`send` 只模拟 ESP32 发射
+- 只有 HTTP `POST /mock/press-button` 才会产生 `315toMQTT` 抓码事件
 
 ### ⚠️ 关于示例中的 HEX
 
@@ -101,7 +100,11 @@ go build -trimpath -o omg315-mock .
 
 ### 配置项
 
-优先级：命令行参数 > 环境变量 > 默认值。
+优先级：命令行参数 > 环境变量 > `.env` > 默认值。
+
+`loadConfig()` 会读取当前目录的 `.env`；从仓库根目录启动时回退到
+`mock/.env`。同名进程环境变量优先于文件值。文件格式为 `KEY=VALUE`，
+支持 `#` 注释、可选的 `export` 前缀与成对引号。
 
 | 参数 | 环境变量 | 默认值 | 说明 |
 |---|---|---|---|
@@ -123,58 +126,56 @@ OMG_TOPIC_PREFIX=test/a \
 go run .
 ```
 
+也可以写入 `.env`（该文件已被 gitignore）：
+
+```dotenv
+MQTT_URL=tcp://127.0.0.1:1883
+MQTT_USERNAME=alice
+MQTT_PASSWORD=secret
+HTTP_ADDR=:18099
+```
+
 ---
 
-## 3. 控制台 CLI
+## 3. 控制台 CLI（仅生命周期）
 
-启动后直接输入：
+模拟器不在控制台提供发码指令。RF 报文只通过 `POST /mock/press-button` 进入，
+与真实网关“接收器持续上报原始码”的行为一致。
 
 | 指令 | 行为 |
 |---|---|
-| `on 1` | 模拟按下 1 号设备“开”，发布 `value=1714739` |
-| `off 1` | 模拟按下 1 号设备“关”，发布 `value=1714740` |
-| `on` / `off` | 省略设备号时默认 1 号 |
-| `rand` | 生成随机 24 位新码，模拟未知遥控器配对 |
-| `press <code>` | 单帧 RX：发送任意 24 位码（支持 `0x` 前缀） |
-| `burst <code> [frames]` | 多帧 RX：模拟一次物理按键产生的重复帧，默认 3 帧、间隔 80ms |
-| `send <code> [repeat]` | 模拟 ESP32 发射 315M 码，默认重放 5 次；只打印 TX，不发布 MQTT |
 | `kill` | 模拟 ESP32 意外掉电：不发送 `DISCONNECT`，强制关闭 TCP，触发 LWT=`offline` |
-| `boot` | 扩展指令：`kill` 之后重新上电并连接 Broker |
+| `boot` | `kill` 之后重新上电并连接 Broker |
 | `status` | 查看电源、MQTT 连接、主题、运行时长 |
 | `help` | 显示帮助 |
 | `quit` | 正常退出：发布 retained `offline` 后断开 |
 
-### 预期输出示例
+### MQTT 收发日志
 
-下发发射指令（后端/Compose 点击按钮）：
+控制台打印每一条收发的 MQTT 消息：
 
 ```text
-[MQTT] <- home/OpenMQTTGateway/commands/MQTTto315 {"value":1714739,"protocol":1,"length":24,"repeat":5}
+[MQTT RX] topic=home/OpenMQTTGateway/commands/MQTTto315 payload={"value":1714739,"protocol":1,"length":24,"repeat":5}
 [315M TX] 模拟天线发射: Value=1714739 (HEX: 0x1A2A33), 重放=5次
+[MQTT TX] topic=home/OpenMQTTGateway/315toMQTT payload={"value":1714739,"protocol":1,"length":24,"delay":330} qos=1 retain=false
 ```
 
-CLI 输入 `on 1`：
+- `[MQTT RX]`：网关订阅到的下行消息
+- `[MQTT TX]`：网关成功发布的上行消息（QoS 1 已被 Broker 确认）
+
+注入一次按键：
+
+```bash
+curl -X POST http://localhost:8099/mock/press-button \
+  -H 'Content-Type: application/json' -d '{"code":1714739}'
+```
 
 ```text
-[315M RX] 模拟按下 1号设备 开: Value=1714739 (HEX: 0x1A2A33), delay=330ms
-[MQTT] -> home/OpenMQTTGateway/315toMQTT {"value":1714739,"protocol":1,"length":24,"delay":330}
+[315M RX] HTTP /mock/press-button 触发按键: Value=1714739 (HEX: 0x1A2A33), delay=330ms
+[MQTT TX] topic=home/OpenMQTTGateway/315toMQTT payload={"value":1714739,"protocol":1,"length":24,"delay":330} qos=1 retain=false
 ```
 
-CLI 输入 `burst 1714739 3`：
-
-```text
-[315M RX] 模拟接收遥控器码 0x1A2A33 的连发帧: Value=1714739 (HEX: 0x1A2A33), frames=3, interval=80ms, delay=330ms
-[MQTT] -> home/OpenMQTTGateway/315toMQTT {"value":1714739,"protocol":1,"length":24,"delay":330}
-```
-
-CLI 输入 `send 1714739 5`：
-
-```text
-[315M TX] 模拟天线发射: Value=1714739 (HEX: 0x1A2A33), 重放=5次
-[315M TX] 来源: CLI send
-```
-
-CLI 输入 `kill`：
+### 预期输出示例：掉电
 
 ```text
 [POWER] 模拟 ESP32 意外掉电：不发送 MQTT DISCONNECT，直接切断 TCP；等待 Broker 发布遗嘱 offline
@@ -230,35 +231,11 @@ curl -X POST http://localhost:8099/mock/press-button \
   -d '{"code":1714739,"frames":3,"interval_ms":80}'
 ```
 
-### `POST /mock/transmit`（模拟 ESP32 发射）
+### TX（ESP32 发射）
 
-不经过 MQTT，直接触发模拟器的“天线发射”路径，用于测试 ESP32 发送侧和自动化脚本。
-
-```bash
-curl -X POST http://localhost:8099/mock/transmit \
-  -H 'Content-Type: application/json' \
-  -d '{"code":1714739,"protocol":1,"length":24,"repeat":5}'
-```
-
-响应：
-
-```json
-{
-  "ok": true,
-  "payload": {
-    "value": 1714739,
-    "protocol": 1,
-    "length": 24,
-    "repeat": 5
-  },
-  "hex": "0x1A2A33"
-}
-```
-
-- `protocol` / `length` 省略时默认 `1` / `24`；`repeat` 省略时默认 `5`
-- `repeat` 范围 `1..50`
-- 发射**不会**发布 `315toMQTT`；命令只有 MQTT 发布结果，没有 RF 确认
-- 网关断电时返回 `503`
+模拟器没有独立的 HTTP 发射入口。TX 只由 MQTT 下发指令触发：
+服务端发布到 `<prefix>/commands/MQTTto315`，网关打印 `[MQTT RX]` 和
+`[315M TX]`；发射本身不产生上行 MQTT 消息。
 
 ### 扩展接口
 
@@ -267,7 +244,6 @@ curl -X POST http://localhost:8099/mock/transmit \
 | `GET` | `/mock/health` | 存活与 MQTT 连接状态 |
 | `GET` | `/mock/status` | 完整状态（ClientID、Broker、主题、运行时长、RX/TX 帧计数、最近码） |
 | `POST` | `/mock/press-button` | 模拟 RX（支持 `frames` / `interval_ms`） |
-| `POST` | `/mock/transmit` | 模拟 TX（不发布 MQTT） |
 | `POST` | `/mock/kill` | 等价 CLI `kill`，用于自动化验证 LWT |
 | `POST` | `/mock/boot` | 等价 CLI `boot` |
 
@@ -289,7 +265,7 @@ curl -X POST http://localhost:8099/mock/boot
    [315M TX] 模拟天线发射: Value=1714739 (HEX: 0x1A2A33), 重放=5次
    ```
 3. 在 Compose 界面点“打开增氧机” → 后端下发指令 → 上述日志出现。
-4. 在 Mock 终端输入 `on 1`（或调用 `POST /mock/press-button`）→ Mock 发布
+4. 调用 `POST /mock/press-button` → Mock 发布
    `home/OpenMQTTGateway/315toMQTT`；服务端把抓码计入学习会话，
    不改变设备或命令状态。
 
@@ -322,7 +298,7 @@ cd mock
 go test ./...
 ```
 
-覆盖：HEX 格式化、RX JSON 精确字段顺序、发射指令解析、随机码范围、HTTP 参数校验、
+覆盖：HEX 格式化、RX JSON 精确字段顺序、发射指令解析、HTTP 参数校验、
 CORS、kill/boot 幂等、health/status 等。
 
 可选 Docker 冒烟测试（会自行拉起隔离的 EMQX + Mock，并验证 MQTT/HTTP/LWT）：
@@ -343,7 +319,7 @@ mock/
 ├── gateway.go           # MQTT 生命周期、命令处理、kill/boot、LWT
 ├── http.go              # HTTP 控制接口
 ├── cli.go               # 交互式 CLI
-├── payload.go           # 协议结构体、解析、随机码、设备映射
+├── payload.go           # 协议结构体、解析、校验
 ├── logger.go            # 并发安全控制台输出
 ├── *_test.go            # 单元测试
 ├── Dockerfile
@@ -365,8 +341,8 @@ mock/
   retained `online`。
 - **单实例**：同一个 ClientID 只应运行一个实例，否则 EMQX 会把旧连接踢下线。并行测试
   时请同时修改 `MQTT_CLIENT_ID` 和 `OMG_TOPIC_PREFIX`。
-- **设备映射**：仅预置 1 号设备的两个码。需要更多物理按键时，在 `payload.go` 的
-  `knownDevices` 中追加即可；临时测试任意码用 `press <code>` 或 HTTP 接口。
+- **唯一注入入口**：控制台不再提供发码指令；任意 24 位码均通过
+  `POST /mock/press-button` 注入，模拟接收器上报原始码。模拟器不理解开/关语义。
 - **安全**：默认匿名连接、无鉴权、监听所有网卡的 8099。仅建议在本机/隔离测试网络使用。
 
 ---

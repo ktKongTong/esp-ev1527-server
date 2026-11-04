@@ -53,13 +53,14 @@ func NewTopics(prefix string) Topics {
 }
 
 func loadConfig() Config {
+	fileValues := loadDotEnv()
 	cfg := Config{
-		MQTTURL:        envOr("MQTT_URL", defaultMQTTURL),
-		ClientID:       envOr("MQTT_CLIENT_ID", defaultClientID),
-		Username:       os.Getenv("MQTT_USERNAME"),
-		Password:       os.Getenv("MQTT_PASSWORD"),
-		HTTPAddr:       envOr("HTTP_ADDR", defaultHTTPAddr),
-		TopicPrefix:    envOr("OMG_TOPIC_PREFIX", defaultTopicPrefix),
+		MQTTURL:        envOrFile("MQTT_URL", defaultMQTTURL, fileValues),
+		ClientID:       envOrFile("MQTT_CLIENT_ID", defaultClientID, fileValues),
+		Username:       envOrFile("MQTT_USERNAME", "", fileValues),
+		Password:       envOrFile("MQTT_PASSWORD", "", fileValues),
+		HTTPAddr:       envOrFile("HTTP_ADDR", defaultHTTPAddr, fileValues),
+		TopicPrefix:    envOrFile("OMG_TOPIC_PREFIX", defaultTopicPrefix, fileValues),
 		ConnectTimeout: 5 * time.Second,
 		KeepAlive:      30 * time.Second,
 	}
@@ -92,9 +93,61 @@ func loadConfig() Config {
 	return cfg
 }
 
-func envOr(key, fallback string) string {
-	if v, ok := os.LookupEnv(key); ok {
-		return v
+// loadDotEnv reads .env from the working directory, or mock/.env when the
+// process runs from the repository root. A missing file is not an error.
+func loadDotEnv() map[string]string {
+	for _, path := range []string{".env", "mock/.env"} {
+		if values, ok := readDotEnv(path); ok {
+			return values
+		}
+	}
+	return map[string]string{}
+}
+
+func readDotEnv(path string) (map[string]string, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	return parseDotEnv(string(data)), true
+}
+
+func parseDotEnv(content string) map[string]string {
+	values := make(map[string]string)
+	for _, raw := range strings.Split(content, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		assignment := strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		separator := strings.IndexByte(assignment, '=')
+		if separator <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(assignment[:separator])
+		if key == "" {
+			continue
+		}
+		value := strings.TrimSpace(assignment[separator+1:])
+		if len(value) >= 2 {
+			quote := value[0]
+			if (quote == '"' || quote == '\'') && value[len(value)-1] == quote {
+				value = value[1 : len(value)-1]
+			}
+		}
+		values[key] = value
+	}
+	return values
+}
+
+// envOrFile resolves in the same order as the server: process environment,
+// then .env values, then the built-in default.
+func envOrFile(key, fallback string, fileValues map[string]string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	if value, ok := fileValues[key]; ok {
+		return value
 	}
 	return fallback
 }

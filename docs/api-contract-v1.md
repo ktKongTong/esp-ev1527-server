@@ -242,7 +242,7 @@ Client ──GET devices（轮询）──► Server ──► 列表不再包�
 | Target | 消费者 | 说明 |
 | --- | --- | --- |
 | `linuxArm64` | `server` | 现有部署目标 |
-| `macosArm64` | `server`（可选） | 与 `-PenableMacosServer=true` 联动 |
+| `macosArm64` | `server`（本地调试） | 所有主机声明；非 macOS 主机由 Kotlin 自动禁用 |
 | `androidLibrary` | `shared` / `androidApp` | AGP 9 KMP library 插件 |
 | `wasmJs` | `shared` / `webApp` | 库 + browser 目标 |
 
@@ -1788,15 +1788,15 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 
 服务端 MQTT 实现：
 
-- 客户端：`dev.koft.ktor-mqtt:mqtt-client:1.2.0`（ktor-mqtt 的
-  `linuxArm64` 构建），只支持 `linuxArm64` 服务端目标。
+- 客户端：`dev.koft.ktor-mqtt:mqtt-client:1.2.2`（ktor-mqtt 的
+  `linuxArm64` / `linuxX64` / `macosArm64` 构建）。
 - 协议：客户端使用 MQTT 5；OpenMQTTGateway/PicoMQTT 仍是 MQTT 3.1.1。
   EMQX 等 Broker 在同一连接内做协议版本桥接，因此网关固件不需要升级。
 - 订阅：`MQTT_TOPIC_PREFIX/#`，QoS 1。
 - 发布：命令主题，QoS 1，不使用 retain。
 - 重连：ktor-mqtt 不自动重连；`MqttTransport` 负责有界指数退避
   （1s → 30s，带抖动），会话稳定 30s 后重置退避。
-- 主题与凭据只从环境变量读取，不写入日志或 API 响应。
+- 主题与凭据从环境变量或配置文件读取，不写入日志或 API 响应。
 
 规则：
 
@@ -1811,24 +1811,23 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
   自定义固件扩展（v1 不依赖）。
 - 315MHz 单向；命令没有确认路径，发布成功即 `dispatched` 终态。
 - 网关不会把服务端 TX 回显到 `315toMQTT`；mock 也按此行为实现。
-- mock 的 `POST /mock/transmit` 与 CLI `send` 只模拟 ESP32 发射，不发布 MQTT；
-  `POST /mock/press-button` 的 `frames` / `interval_ms` 与 CLI `burst` 用于模拟
-  一次物理按键产生的多帧 RX。
+- mock 的 `POST /mock/press-button` 是唯一的 RX 注入入口；`frames` / `interval_ms`
+  模拟一次物理按键产生的多帧 RX。mock 不提供独立 TX 入口，TX 只由
+  `commands/MQTTto315` 下发指令触发。
 - 接收器可用性在 v1 由“是否观察到捕获”推断；`unknown` 不等于故障，
   只有明确 `unavailable` 或采集窗口零捕获时才提示排查。
 
-学习相关的模拟操作（mock CLI）：
+学习相关的模拟操作（mock HTTP）：
 
-- `rand`：模拟未知遥控器，产生新的 24 位码；学习时同一码需要执行 3 次
-  （每次间隔 ≥600ms），服务端才会把它判为候选。
-- `on 1` / `off 1`：模拟已知设备的开/关码；用于控制/冲突测试。
-- `press <code>`：发送任意 24 位单帧码；学习时同样需要同一码 3 次。
-- `burst <code> [frames]`：模拟一次按键产生的多帧 RX（默认 3 帧、间隔 80ms），
-  用于验证服务端把 400ms 内的同码帧合并为一次按键。
-- `send <code> [repeat]`：模拟 ESP32 发射侧；不发布捕获，不推进学习。
-- 以上 RX 命令通过 mock 的“虚拟天线”发布 `315toMQTT`，
-  等价于真实网关接收器收到信号；它们不是服务端直接注入捕获。
-- 若 mock 一次命令只发布一帧，学习 UI 会显示 `1/3`；连续执行 3 次才达标。
+- `POST /mock/press-button {"code":<24位码>}`：模拟接收器上报一帧；
+  学习时同一码需要执行 3 次（每次间隔 ≥600ms），服务端才会把它判为候选。
+- `POST /mock/press-button {"code":<24位码>,"frames":3,"interval_ms":80}`：
+  模拟一次按键产生的多帧 RX，用于验证服务端把 400ms 内的同码帧合并为一次按键。
+- mock 不再提供 `on/off/rand/press/burst/send` 等 CLI 快捷指令，也不内置
+  设备码表；任意码都通过 press-button 注入，避免把业务语义误认为网关能力。
+- 以上 RX 注入通过 mock 的“虚拟天线”发布 `315toMQTT`，
+  等价于真实网关接收器收到信号；不是服务端直接注入捕获。
+- 若一次请求只发布一帧，学习 UI 会显示 `1/3`；连续请求 3 次才达标。
   真实网关可能一次按键发多帧，服务端会把 400ms 内的同码帧合并为一次按键。
 
 ---

@@ -3,7 +3,7 @@
 # 隔离式端到端冒烟测试：
 #   - 自建 Docker 网络，使用临时容器名，不占用宿主机 1883
 #   - 拉起 EMQX + Mock + MQTT 订阅者
-#   - 验证 retained online/version、MQTTto315 -> TX 日志、HTTP 抓码、kill/LWT、boot、CLI
+#   - 验证 retained online/version、MQTT RX/TX 日志、HTTP 抓码、kill/LWT、boot、CLI 生命周期
 #
 # 依赖：docker、curl、bash。首次运行会拉取 emqx/emqx:5.8.7 与 eclipse-mosquitto:2.0。
 set -euo pipefail
@@ -112,6 +112,8 @@ docker run --rm --network "$NET" --entrypoint mosquitto_pub eclipse-mosquitto:2.
   -m '{"value":1714739,"protocol":1,"length":24,"repeat":5}'
 wait_log "$MOCK" '[315M TX] 模拟天线发射: Value=1714739 (HEX: 0x1A2A33), 重放=5次' \
   || fail "未看到 [315M TX] 日志"
+wait_log "$MOCK" "[MQTT RX] topic=$PREFIX/commands/" \
+  || fail "未看到 [MQTT RX] 日志"
 
 info "2) HTTP press-button，校验 315toMQTT"
 response="$(curl -sf -X POST "$BASE/mock/press-button" \
@@ -120,18 +122,13 @@ printf '%s\n' "$response"
 printf '%s' "$response" | grep -q '"delay":330' || fail "press-button 响应缺少 delay=330"
 wait_log "$SUB" "$PREFIX/315toMQTT {\"value\":1714739,\"protocol\":1,\"length\":24,\"delay\":330}" \
   || fail "订阅者未收到 315toMQTT"
-
-info "2b) HTTP transmit，校验 TX 不发布 RX 且计数累加"
-response="$(curl -sf -X POST "$BASE/mock/transmit" \
-  -H 'Content-Type: application/json' -d '{"code":1714739,"repeat":5}')"
-printf '%s\n' "$response"
-printf '%s' "$response" | grep -q '"repeat":5' || fail "transmit 响应缺少 repeat=5"
+wait_log "$MOCK" "[MQTT TX] topic=$PREFIX/315toMQTT" \
+  || fail "未看到 [MQTT TX] 日志"
 status="$(curl -sf "$BASE/mock/status")"
 printf '%s\n' "$status"
-printf '%s' "$status" | grep -q '"rx_frames":1' || fail "transmit 不应增加 rx_frames（期望 1）"
-printf '%s' "$status" | grep -q '"tx_frames":10' || fail "tx_frames 期望 10（MQTT 5 + HTTP 5）"
+printf '%s' "$status" | grep -q '"rx_frames":1' || fail "press-button 后 rx_frames 期望 1"
 
-info "2c) HTTP 多帧 RX，校验一次按键的连发帧"
+info "2b) HTTP 多帧 RX，校验一次按键的连发帧"
 response="$(curl -sf -X POST "$BASE/mock/press-button" \
   -H 'Content-Type: application/json' -d '{"code":1714739,"frames":3,"interval_ms":80}')"
 printf '%s\n' "$response"
@@ -166,33 +163,19 @@ done
 [ "$booted" -eq 1 ] || fail "boot 后 MQTT 未恢复连接"
 wait_retained "$PREFIX/LWT" online || fail "boot 后 retained LWT 不是 online"
 
-info "5) CLI on 1 / off 1 / rand / burst / send，校验日志"
+info "5) CLI status / quit，校验生命周期日志与正常退出"
 docker rm -f "$MOCK" >/dev/null 2>&1 || true
 (
   sleep 3
-  echo 'on 1'
-  sleep 1
-  echo 'off 1'
-  sleep 1
-  echo 'rand'
-  sleep 1
-  echo 'burst 1714739 3'
-  sleep 1
-  echo 'send 1714740 2'
+  echo 'status'
   sleep 1
   echo 'quit'
 ) | docker run --rm -i --network "$NET" -e MQTT_URL="tcp://$EMQX:1883" "$IMAGE" >"$TMP/cli.log" 2>&1 || true
 
-grep -qF '[315M RX] 模拟按下 1号设备 开: Value=1714739' "$TMP/cli.log" \
-  || fail "CLI on 1 日志缺失"
-grep -qF '[315M RX] 模拟按下 1号设备 关: Value=1714740' "$TMP/cli.log" \
-  || fail "CLI off 1 日志缺失"
-grep -qF '模拟按下未知遥控器' "$TMP/cli.log" \
-  || fail "CLI rand 日志缺失"
-grep -qF '[315M RX] 模拟接收遥控器码 0x1A2A33 的连发帧: Value=1714739 (HEX: 0x1A2A33), frames=3' "$TMP/cli.log" \
-  || fail "CLI burst 日志缺失"
-grep -qF '[315M TX] 来源: CLI send' "$TMP/cli.log" \
-  || fail "CLI send 日志缺失"
+grep -qF '[STATUS] 电源=上电' "$TMP/cli.log" \
+  || fail "CLI status 日志缺失"
+grep -qF "[MQTT TX] topic=$PREFIX/LWT payload=offline" "$TMP/cli.log" \
+  || fail "CLI quit 未发布 offline"
 wait_retained "$PREFIX/LWT" offline || fail "CLI 正常退出后 retained LWT 不是 offline"
 
 info "全部通过 ✅"

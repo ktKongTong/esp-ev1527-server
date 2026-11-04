@@ -1,10 +1,16 @@
 package com.esp32.control.server.mqtt
 
 import com.esp32.control.server.MqttConfig
+import com.esp32.control.server.MqttTransportType
 import de.kempmobil.ktor.mqtt.Disconnected
 import de.kempmobil.ktor.mqtt.MqttClient
+import de.kempmobil.ktor.mqtt.MqttClientConfigBuilder
+import de.kempmobil.ktor.mqtt.MqttEngine
+import de.kempmobil.ktor.mqtt.MqttEngineConfig
+import de.kempmobil.ktor.mqtt.MqttEngineFactory
 import de.kempmobil.ktor.mqtt.PublishRequest
 import de.kempmobil.ktor.mqtt.QoS
+import de.kempmobil.ktor.mqtt.buildConfig
 import de.kempmobil.ktor.mqtt.buildFilterList
 import de.kempmobil.ktor.mqtt.packet.hasFailure
 import kotlin.random.Random
@@ -49,7 +55,30 @@ class MqttTransport(
         },
     )
 
-    private val client = MqttClient(config.host, config.port) {
+    private val endpoint: String = when (config.transport) {
+        MqttTransportType.TCP -> "tcp://${config.host}:${config.port}"
+        MqttTransportType.WEBSOCKET ->
+            "${if (config.useTls) "wss" else "ws"}://${config.host}:${config.port}${config.websocketPath}"
+    }
+
+    private val client: MqttClient = when (config.transport) {
+        MqttTransportType.TCP -> MqttClient(config.host, config.port) {
+            applyClientConfig(config)
+        }
+        MqttTransportType.WEBSOCKET -> {
+            val engine = WebSocketMqttEngine(
+                host = config.host,
+                port = config.port,
+                path = config.websocketPath,
+                secure = config.useTls,
+            )
+            MqttClient(buildConfig(PrebuiltEngineFactory(engine)) {
+                applyClientConfig(config)
+            })
+        }
+    }
+
+    private fun MqttClientConfigBuilder<MqttEngineConfig>.applyClientConfig(config: MqttConfig) {
         clientId = config.clientId
         keepAliveSeconds = config.keepAliveSeconds.toUShort()
         username = config.username
@@ -77,6 +106,7 @@ class MqttTransport(
             val sessionStartedAt = TimeSource.Monotonic.markNow()
             var sessionEstablished = false
             try {
+                println("connecting to $endpoint for $topicFilter")
                 val connack = client.connect(isCleanStart = true).getOrThrow()
                 if (!connack.isSuccess) {
                     throw MqttUnavailableException("MQTT CONNACK rejected: ${connack.reason}")
@@ -91,6 +121,7 @@ class MqttTransport(
                 }
 
                 sessionEstablished = true
+                println("MQTT session established: $endpoint")
 
                 // ktor-mqtt does not reconnect by itself. Wait for the engine
                 // to report the socket loss, then rebuild the session above.
@@ -98,6 +129,7 @@ class MqttTransport(
             } catch (e: CancellationException) {
                 throw e
             } catch (cause: Throwable) {
+                cause.printStackTrace()
                 println("MQTT session failed: ${cause.message}")
             } finally {
                 if (sessionEstablished) {
@@ -131,4 +163,10 @@ class MqttTransport(
         runCatching { client.close() }
         scope.cancel()
     }
+}
+
+private class PrebuiltEngineFactory(
+    private val engine: MqttEngine,
+) : MqttEngineFactory<MqttEngineConfig> {
+    override fun create(block: MqttEngineConfig.() -> Unit): MqttEngine = engine
 }

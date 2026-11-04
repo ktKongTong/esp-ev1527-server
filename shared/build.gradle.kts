@@ -12,7 +12,7 @@ plugins {
 kotlin {
     // AGP 9 requires the dedicated Android KMP library plugin instead of
     // com.android.library + androidTarget().
-    androidLibrary {
+    android {
         namespace = "com.esp32.control.gui.shared"
         compileSdk = libs.versions.android.compile.sdk.get().toInt()
         minSdk = libs.versions.android.min.sdk.get().toInt()

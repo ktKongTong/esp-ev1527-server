@@ -50,7 +50,7 @@ MQTT 摄入由 `GatewayIngest` 分发给学习状态机。`Main.kt` 只负责组
 ```
 esp32/
 ├── contract/        KMP 共享协议：DTO、ContractJson、枚举
-├── server/          Ktor 3 + Kotlin/Native（linuxArm64）+ ktor-mqtt + Room3/SQLite
+├── server/          Ktor 3 + Kotlin/Native（linuxArm64、macOS 本地调试）+ ktor-mqtt + Room3/SQLite
 ├── shared/          Compose Multiplatform UI 与 Ktor 客户端（Android + Wasm）
 ├── androidApp/      Android 应用壳（Material You 动态取色）
 ├── webApp/          Kotlin/Wasm Web 应用与 index.html
@@ -76,7 +76,7 @@ esp32/
 | Gradle | 9.6.1 | Wrapper 已包含 |
 | JDK | 17 | 编译与 Gradle 运行 |
 | Ktor | 3.6.1 | 服务端 CIO；客户端 Android 用 CIO，Web 用 Js/fetch |
-| MQTT | `dev.koft.ktor-mqtt` 1.2.0 | MQTT 5 客户端；适配层负责重连与 QoS 1 |
+| MQTT | `dev.koft.ktor-mqtt` 1.2.2 | MQTT 5 客户端；同时发布 Linux 与 macOS 变体 |
 | 持久化 | Room3 3.0.3 + SQLite 2.7.1 | `room3-runtime` / KSP；`sqlite-bundled` 驱动，无宿主机依赖 |
 | Kotlin/Wasm | 2.4.21 | 浏览器端使用 WasmGC |
 | EMQX | 5.8.7 | 仅测试栈使用，可替换为任意 MQTT 3.1.1 Broker |
@@ -135,6 +135,37 @@ curl -s http://127.0.0.1:8080/api/v1/health | jq
 ```
 
 MQTT 是必需配置：未设置 `MQTT_HOST` 时服务端拒绝启动，不提供无网关的降级模式。
+
+本地在 macOS 上运行或从 IDE 调试时，可读取 `.env` 文件：
+
+```bash
+cp server/.env.example server/.env   # 填入 MQTT_HOST、MQTT_USERNAME、MQTT_PASSWORD
+./gradlew :server:linkDebugExecutableMacosArm64
+./server/build/bin/macosArm64/debugExecutable/esp32-control-server.kexe
+```
+
+服务端按以下顺序读取配置：进程环境变量 → `CONFIG_FILE` 指定的文件 →
+当前目录 `.env` → `server/.env`。同名环境变量优先于文件，容器部署行为不变。
+`server/.env` 已被 gitignore，不要提交凭据。
+
+EMQX Cloud 等托管 Broker 通常只开放 TLS 端口；Ktor Native 的
+`ktor-network-tls` 不支持裸 TLS socket。服务端改用 MQTT over WebSocket
+Secure（`wss`）：Ktor 的 Curl 引擎自带静态 libcurl + OpenSSL，在
+`linuxArm64`、`linuxX64` 与 `macosArm64` 上都能完成 TLS，不需要外部脚本或
+本地转发进程。
+
+```bash
+# server/.env（凭据不要提交）
+MQTT_HOST=<broker-host>
+MQTT_PORT=8084
+MQTT_TRANSPORT=websocket
+MQTT_TLS=true
+MQTT_WS_PATH=/mqtt
+```
+
+EMQX 的 WSS 监听器默认使用 8084 端口和 `/mqtt` 路径。`MQTT_TLS=true`
+只能与 `MQTT_TRANSPORT=websocket` 搭配；裸 TCP + TLS 会在启动时直接报错，
+避免再次出现“连接成功但收不到 CONNACK”的情况。
 
 ### 3. 启动 Web 端
 
@@ -282,6 +313,7 @@ v1.2.0 不提供事件流。客户端按场景轮询快照：学习 1s、设备�
 | `MQTT_TOPIC_PREFIX` | `home/OpenMQTTGateway` | 命令、LWT、版本、抓码的公共前缀 |
 | `GATEWAY_CLIENT_ID` | `OpenMQTTGateway_ESP32_315M` | UI/诊断展示用网关 ClientID |
 | `DATABASE_PATH` | `esp32-control.db` | SQLite 文件路径；相对路径基于进程工作目录 |
+| `CONFIG_FILE` | 空 | 额外的 `KEY=VALUE` 配置文件路径；未设置时尝试 `.env`、`server/.env` |
 
 设备、命令、幂等 key 与 tombstone 持久化在 SQLite（Room3）。网关在线状态
 和学习会话是运行时状态：网关状态由 retained LWT 恢复，学习会话在重启后
@@ -294,14 +326,12 @@ v1.2.0 不提供事件流。客户端按场景轮询快照：学习 1s、设备�
 curl -s http://127.0.0.1:8099/mock/health
 curl -s -X POST http://127.0.0.1:8099/mock/press-button \
   -H 'Content-Type: application/json' -d '{"code":1714739,"frames":3}'
-curl -s -X POST http://127.0.0.1:8099/mock/transmit \
-  -H 'Content-Type: application/json' -d '{"code":1714739,"repeat":5}'
 curl -s -X POST http://127.0.0.1:8099/mock/kill   # 触发 LWT offline
 curl -s -X POST http://127.0.0.1:8099/mock/boot   # 重新上线
 ```
 
-CLI：`on 1`、`off 1`、`rand`、`press <code>`、`burst <code> [frames]`、
-`send <code> [repeat]`、`kill`、`boot`、`status`。
+RX 注入只有 `POST /mock/press-button`。CLI 仅保留 `kill`、`boot`、
+`status`、`help`、`quit`；TX 只由 MQTT 下发指令触发。
 详见 [`mock/README.md`](mock/README.md)。
 
 ## Material You 与字体
@@ -335,6 +365,11 @@ CLI：`on 1`、`off 1`、`rand`、`press <code>`、`burst <code> [frames]`、
 - `:contract:testAndroidHostTest` 通过。
 - `:server:linkDebugExecutableLinuxArm64`、`:androidApp:assembleDebug`、
   `:webApp:wasmJsBrowserDistribution` 构建成功。
+- `:server:linkDebugExecutableMacosArm64` 构建成功；`CONFIG_FILE` 配置加载
+  与“环境变量优先”行为已验证。
+- 通过 `wss://<broker>:8084/mqtt` 连接 EMQX Cloud（Curl 引擎，TLS）成功：
+  MQTT 会话建立、订阅完成，凭据不出现在日志中。网关状态取决于真实网关
+  是否发布 retained LWT。
 - Room3 KSP 生成 `AppDatabase` 与 schema；ktor-mqtt 在 `linuxArm64` 完成链接。
 - `mock/` 的 `go test ./...` 通过。
 
@@ -377,8 +412,8 @@ AGP 9.4 强制要求 Build Tools 36.0.0（即使 compileSdk 仍是 35）。
 通过 SDK Manager 安装 `build-tools;36.0.0`。
 
 **Kotlin/Native macOS 目标构建失败**
-本机只有 Command Line Tools 时无法链接 macOS 目标，请使用 linuxArm64 +
-Docker 流程，或安装完整 Xcode 后加 `-PenableMacosServer=true`。
+本机只有 Command Line Tools 时无法链接 Apple 目标，请安装完整 Xcode，
+或改用 linuxArm64 + Docker 流程。非 macOS 主机会自动禁用 Apple 目标。
 
 **Gradle 报 `minCompileSdk 37`**
 Compose Multiplatform 被升级到了 1.12.x。保持 1.10.0，或同步升级

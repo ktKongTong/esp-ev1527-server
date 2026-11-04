@@ -316,8 +316,18 @@ fun App() {
                     }
                 } catch (t: Throwable) {
                     if (t is CancellationException) throw t
-                    learningError = t.readableMessage()
                     learningId = null
+                    if (t is ClientApiException && t.status == 404) {
+                        // Sessions live in server memory and die with the process.
+                        learning = null
+                        showLearning = false
+                        learningError = null
+                        testMessage = null
+                        completedDeviceName = null
+                        error = "学习会话已失效，请重新开始"
+                    } else {
+                        learningError = t.readableMessage()
+                    }
                     break
                 }
             }
