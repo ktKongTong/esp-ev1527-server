@@ -1,3 +1,3 @@
 package com.esp32.control.gui
 
-actual fun platformLabel(): String = "Android · KMP"
+actual fun platformLabel(): String = "Android"

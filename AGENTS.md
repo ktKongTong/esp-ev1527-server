@@ -30,27 +30,31 @@ rg -n "require|replace" mock/go.mod
 
 | 能力 | 既有位置 | 复用要求 |
 | --- | --- | --- |
-| 跨端 DTO、枚举、SSE 事件、错误信封 | `contract/` | 新增协议类型只放这里，禁止在 `server`、`shared` 各写一份 |
+| 跨端 DTO、枚举、错误信封 | `contract/` | 新增协议类型只放这里，禁止在 `server`、`shared` 各写一份 |
 | JSON 配置 | `ContractJson` | 统一使用，不新建第二套 `Json {}` |
-| 设备/命令/学习状态机 | `server/.../ControlPlane.kt` | 扩展现有领域逻辑，不在路由或客户端复制状态机 |
-| MQTT 连接与发布 | `server/.../MqttClient.kt`（KMQTT 1.0.0 薄适配层） | 扩展适配层；MQTT 协议、keepalive、QoS 1、订阅由 KMQTT 负责，禁止再写第二套 MQTT 客户端 |
-| SSE 传输 | Ktor 3.6.1 `server-sse` + `server/.../SseHub.kt` | 用 `sse()` / `heartbeat()` / `ServerSentEvent`；`SseHub` 只保留重放与 `stream.reset` 领域策略 |
-| HTTP/SSE 客户端 | `shared/.../api/Esp32Api.kt` | 扩展现有 API 适配层，UI 不直接拼 URL |
+| 设备/命令/学习状态机 | `server/.../domain/` | 扩展对应领域服务；不在路由或客户端复制状态机，不重新合并成 God object |
+| 持久化 | `server/.../db/` + `server/.../data/` | Room3 entity/DAO 与仓储；领域服务不直接拼 SQL，不引入第二套 ORM |
+| MQTT 连接与发布 | `server/.../mqtt/MqttTransport.kt`（ktor-mqtt 1.2.0 薄适配层） | 扩展适配层；MQTT 协议、keepalive、QoS 1、订阅由 ktor-mqtt 负责，禁止再写第二套 MQTT 客户端 |
+| 状态同步 | `shared/.../api/Esp32Api.kt` + `shared/.../App.kt` | v1.2.0 使用轮询；不新增事件流或客户端第二套状态机 |
 | 网关/设备/学习 UI | `shared/.../App.kt` | 复用现有页面、轮询与错误文案 |
 | OpenMQTTGateway 仿真 | `mock/` | 复用现有 CLI/HTTP 控制与 paho 客户端 |
 
 ### 1.3 已确定的复用决策
 
-- **MQTT**：使用 MIT 许可的 `io.github.davidepianca98:kmqtt-client:1.0.0`，
-  支持 Kotlin/Native `linuxArm64`、MQTT 3.1.1、QoS 1、订阅与 keepalive。
-  `MqttClient.kt` 只保留 KMQTT 1.0.0 未提供的行为：断线重连、Broker 断开时
-  异常隔离、主题分类和 `ByteArray` ↔ `UByteArray` 边界转换。
+- **MQTT**：使用 Apache-2.0 的 `dev.koft.ktor-mqtt:mqtt-client:1.2.0`
+  （上游 `ktKongTong/ktor-mqtt`），支持 MQTT 5、QoS 1、订阅与 keepalive。
+  `MqttTransport.kt` 只保留库未提供的行为：断线重连、Broker 断开时异常隔离、
+  主题过滤和 `ByteArray` ↔ `ByteString` 边界转换。
+- **MQTT 为必需配置**：未设置 `MQTT_HOST` 时服务端拒绝启动；不实现
+  `UnavailableRfTransmitter` 之类的无网关降级路径。
+- **平台**：ktor-mqtt 只发布 `linuxArm64`，因此 `server` 只保留 `linuxArm64`
+  目标；不为了 `linuxX64` 再写一套 MQTT 实现。
 - **未采用 DitchOoM MQTT**：其 Linux 实现依赖 io_uring；Docker 默认 seccomp
   返回 `Operation not permitted`，运行即崩溃。放宽容器 seccomp 的代价高于收益。
 - **未采用 Meshtastic MQTT**：许可证为 GPL-3.0，与仓库分发约束不匹配。
-- **未采用 ukemp/ktor-mqtt**：没有 `linuxArm64` 目标。
-- **SSE**：传输使用 Ktor `server-sse`；`SseHub` 仅保留 256 条重放缓存、
-  `Last-Event-ID` 补发和 `stream.reset` 这些契约要求。
+- **持久化**：SQLite + Room3（`room3-runtime` / `room3-compiler` /
+  `sqlite-bundled`），按 `docs/server.md` 的技术栈要求；不使用第二套 ORM。
+- **状态同步**：v1.2.0 不提供 SSE；客户端按契约周期轮询快照。
 - **时间**：使用 Kotlin 标准库 `kotlin.time.Clock`，不直接调用 POSIX 时间 API。
 - **JSON / HTTP / CORS / 错误映射**：分别复用 `ContractJson`、Ktor 客户端、
   Ktor CORS 与 StatusPages；不手写协议帧或第二套 JSON 配置。

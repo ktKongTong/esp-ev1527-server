@@ -2,7 +2,8 @@ package com.esp32.control.server.routes
 
 import com.esp32.control.contract.CommandRequest
 import com.esp32.control.server.ApiException
-import com.esp32.control.server.ControlPlane
+import com.esp32.control.server.domain.CommandService
+import com.esp32.control.server.domain.DeviceService
 import com.esp32.control.server.invalidDeviceId
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
@@ -14,14 +15,14 @@ import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 
-fun Route.deviceRoute(control: ControlPlane) {
+fun Route.deviceRoute(devices: DeviceService, commands: CommandService) {
     get("/devices") {
-        call.respond(control.listDevices())
+        call.respond(devices.list())
     }
 
     get("/devices/{deviceId}") {
         val deviceId = call.parameters["deviceId"] ?: throw invalidDeviceId()
-        call.respond(control.getDevice(deviceId))
+        call.respond(devices.get(deviceId))
     }
 
     post("/devices/{deviceId}/commands") {
@@ -33,7 +34,7 @@ fun Route.deviceRoute(control: ControlPlane) {
                 "Idempotency-Key is required",
             )
         val request = call.receive<CommandRequest>()
-        val result = control.issueCommand(deviceId, request.action, idempotencyKey)
+        val result = commands.issue(deviceId, request.action, idempotencyKey)
         if (result.replayed) {
             call.response.header("Idempotent-Replayed", "true")
         }
@@ -47,12 +48,12 @@ fun Route.deviceRoute(control: ControlPlane) {
                 "command_not_found",
                 "Command not found",
             )
-        call.respond(control.getCommand(commandId))
+        call.respond(commands.get(commandId))
     }
 
     delete("/devices/{deviceId}") {
         val deviceId = call.parameters["deviceId"] ?: throw invalidDeviceId()
-        control.deleteDevice(deviceId)
+        devices.delete(deviceId)
         call.respond(HttpStatusCode.NoContent)
     }
 }

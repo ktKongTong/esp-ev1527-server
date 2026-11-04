@@ -55,6 +55,10 @@ Thumbs.db
 # Runtime artifacts
 captures/
 **/captures/
+.data/
+*.db
+*.db-shm
+*.db-wal
 *.log
 *.hprof
 hs_err_pid*

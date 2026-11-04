@@ -1,12 +1,12 @@
 # ESP32 Control 接口、状态机与数据流契约 v1
 
-- 状态：**已实现**（contract v1.1.0）
+- 状态：**已实现**（contract v1.2.0）
 - 日期：2026-11-03
 - 适用端：`server`（Ktor + Kotlin/Native）、`androidApp`、`webApp`
 - 覆盖范围：**控制设备开关、学习新设备、移除旧设备**，以及三者依赖的
-  网关状态机、设备生命周期、命令状态机、学习会话状态机和事件数据流
+  网关状态机、设备生命周期、命令状态机、学习会话状态机和轮询一致性
 
-> 本文定义协议与状态机。DTO、枚举、SSE 事件与 `ContractJson` 已落在
+> 本文定义协议与状态机。DTO、枚举与 `ContractJson` 已落在
 > [`contract`](../contract) 模块，服务端路由与 UI 均以该模块为准；
 > 文中 Kotlin 片段用于说明字段形状，可能与源码略去私有实现细节。
 
@@ -56,7 +56,6 @@
 | `POST` | `/api/v1/learning/sessions/{id}/test` | `202 LearningTestResult` | 试发已确认的码 |
 | `POST` | `/api/v1/learning/sessions/{id}/confirm` | `201 LearningConfirmation` | 命名并保存新设备 |
 | `DELETE` | `/api/v1/learning/sessions/{id}` | `204` | 取消学习 |
-| `GET` | `/api/v1/events` | `200 text/event-stream` | SSE 状态/抓码事件 |
 
 ---
 
@@ -65,7 +64,7 @@
 ### 1.1 角色
 
 ```
-┌──────────┐   HTTP/JSON/SSE   ┌──────────────┐   MQTT   ┌───────────┐  315MHz RF  ┌────────┐
+┌──────────┐   HTTP/JSON       ┌──────────────┐   MQTT   ┌───────────┐  315MHz RF  ┌────────┐
 │ Android  │ ◄───────────────► │    Server    │ ◄──────► │  Gateway  │ ◄─────────► │ Remote │
 │   Web    │                   │ Kotlin/Native│          │  ESP32    │             │ Button │
 └──────────┘                   └──────────────┘          └───────────┘             └────────┘
@@ -111,7 +110,8 @@
 - 网关通常不会把自己刚发射的码回显到 `315toMQTT`；即使回显，也无法区分
   是本次命令还是用户按了遥控器。
 - 设备的 `state` 是**服务端最佳已知状态**，不是传感器读数。
-  通过 `stateEvidence` 明确它是“已上报”还是“仅命令推断”。
+  `stateEvidence=commanded` 表示它由命令推断；`unknown` 表示从未控制过。
+  协议不提供“已上报/已执行”状态。
 
 ---
 
@@ -126,9 +126,12 @@ Client ──POST command──► Server
                           ├─ 发布 MQTTto315 {value, protocol, length, repeat}
                           ├─ 设备 state 标记为 commanded（乐观）
                           └─ 返回 202 + 更新后的 Device
-Server ──SSE command.updated / device.updated──► 所有 Client
-Gateway ──315toMQTT（可选，若收到）──► Server ──可选确认──► CommandRecord.confirmed
+Client ──GET devices（轮询）──► Server ──► 最新 Device
+Gateway ──315toMQTT──► Server ──► 仅用于学习与接收器状态
 ```
+
+MQTT QoS 1 的 PUBACK 只表示 Broker 收下了消息。315MHz 没有协议层 ACK，
+因此 `dispatched` 就是命令的正常终态，服务端不等待也不推断执行结果。
 
 ### 2.2 学习新设备
 
@@ -154,7 +157,7 @@ Server: 按 (protocol,length,value) 聚类
         ├─ 与上次同码间隔 ≥600ms = 新的一次按键，hitCount++
         └─ hitCount 1/3 → 2/3 → 3/3
 Server: 候选达到 requiredHits=3 → state=candidate_on_ready（停止开码采集，确认窗口 30s）
-Server ──SSE learning.updated──► Client（展示候选码、按键次数、冲突信息）
+Client ──GET learning/sessions/{id}（1s 轮询）──► Server（展示候选码、按键次数、冲突信息）
 Client: 选择候选码并确认它是“开” ──POST .../candidates/{id}/accept──► Server
 Server: state=collecting_off（关码采集窗口 60s）
 User 连续按遥控器关键 3 次
@@ -164,7 +167,7 @@ Client: 确认候选码是“关” ──POST .../candidates/{id}/accept──�
 Server: state=ready（保留两个已接受的候选码，保存窗口 5min）
 Client ──POST confirm {name, location}──► Server
 Server: 校验已接受的开/关候选码、冲突、协议/位宽 → 创建设备 → 写入码归属 → completed
-Server ──SSE learning.updated + device.added──► Client
+Server ──201 LearningConfirmation──► Client ──GET devices（刷新列表）──► Server
 ```
 
 关键点：
@@ -194,7 +197,7 @@ Server: active → removing
         ├─ 从设备列表移除
         ├─ 写 tombstone（保留 24h）
         └─ removing → removed
-Server ──SSE device.removed──► 所有 Client
+Client ──GET devices（轮询）──► Server ──► 列表不再包含该设备
 ```
 
 移除**不发送 MQTT 消息**。网关没有“忘记设备”的概念；移除只是服务端不再
@@ -207,11 +210,11 @@ Server ──SSE device.removed──► 所有 Client
 | MQTT 订阅 | 服务端未接入 MQTT | 必须常驻订阅 `315toMQTT`、LWT、version |
 | 捕获处理 | 无 | 网关接收器上报 → 服务端归一化/按按键分组/聚合候选 |
 | 学习信号来源 | 无 | **只来自网关 315MHz 接收器**；服务端不生成 RF 码 |
-| 客户端更新 | 请求后手动刷新/30s 轮询 | SSE 推送 + revision 校正；轮询作为降级 |
-| 设备创建 | 启动时两条内存演示数据 | 学习确认后动态创建 |
+| 客户端更新 | 请求后手动刷新/30s 轮询 | 轮询 + revision 校正；学习期间 1s、空闲 30s |
+| 设备创建 | 启动时两条内存演示数据 | 学习确认后动态创建并持久化 |
 | 设备删除 | 无 | `DELETE` + tombstone + 码释放 |
 | 开关语义 | `POST toggle` | `POST commands` + 显式动作 + 命令状态 |
-| 设备状态 | `on: Boolean` | `state` + `stateEvidence`（reported/commanded/unknown） |
+| 设备状态 | `on: Boolean` | `state` + `stateEvidence`（commanded/unknown） |
 | 码资源 | 仅展示 | 全局码归属索引，学习时做冲突检测 |
 
 ---
@@ -222,17 +225,17 @@ Server ──SSE device.removed──► 所有 Client
 
 新增 `contract` KMP 模块，三端共用：
 
-- 所有 HTTP DTO、SSE 事件类型、枚举
+- 所有 HTTP DTO、枚举
 - 路由/Header/错误码常量
 - 唯一 `ContractJson` 配置
 - 学习/命令/设备状态枚举及转换规则（纯常量与类型，不含业务逻辑）
 
 不放入 `contract`：
 
-- Ktor `HttpClient`、SSE 客户端实现
+- Ktor `HttpClient`、轮询调度
 - Compose UI、中文文案
 - MQTT 客户端
-- 服务端设备注册表、命令执行器、学习管理器
+- 服务端数据库、仓储、命令执行器、学习管理器
 
 ### 3.2 目标平台
 
@@ -261,17 +264,56 @@ shared ─────────────┘
 - `shared`：`api(project(":contract"))`，让两个 GUI 都能使用 DTO
 - 禁止在 `server` 与 `shared` 各维护一份同名模型
 
-### 3.4 服务端内部模块（建议，不要求同进程分层）
+### 3.4 服务端内部模块
+
+服务端按职责分层，不使用单一 `ControlPlane` 对象。`Main.kt` 只是组合根：
 
 ```
-MQTT Ingest ──► CaptureNormalizer / PressClusterer ──► LearningManager
-                                              └─► EventBus
-HTTP Routes ──► DeviceRegistry / CommandExecutor / LearningManager
-DeviceRegistry ──► CodeOwnershipIndex
-CommandExecutor ──► MqttPublisher
+MQTT Transport ──► GatewayIngest ──► LearningService (捕获聚类/状态机)
+HTTP Routes ─────► DeviceService / CommandService / LearningService
+Services ────────► Repositories ──► Room3 DAO ──► SQLite
+CommandService ──► RfTransmitter ──► MQTT Transport
 ```
 
-状态机逻辑放在服务端领域服务中，不放在 HTTP 路由或客户端。
+| 层 | 位置 | 职责 |
+| --- | --- | --- |
+| 组合根 | `server/.../Main.kt` | 读取配置、创建数据库/服务/MQTT、启动 HTTP 与定时器 |
+| 传输适配 | `server/.../mqtt/` | ktor-mqtt 连接、订阅、发布、重连监督；RF 抓码摄入、网关运行时状态与 RF 下发 |
+| 领域服务 | `server/.../domain/` | 设备、命令、学习状态机 |
+| 数据访问 | `server/.../data/` | 仓储与 entity ↔ contract 映射 |
+| 持久化 | `server/.../db/` | Room3 entity、DAO、`AppDatabase`、SQLite 驱动 |
+| HTTP | `server/.../routes/` | 参数/请求体解析、状态码映射；不含状态机 |
+
+约束：
+
+- 状态机逻辑只放在领域服务中，不放 HTTP 路由或客户端。
+- 服务之间的共享状态要么在 SQLite，要么在明确的运行时存储
+  （`mqtt/GatewayStatusStore`），不通过全局可变对象传递。
+- MQTT 回调只做解析和转发；业务判定由 `CommandService`/`LearningService` 完成。
+
+### 3.5 持久化（SQLite + Room3）
+
+- 数据库：SQLite，通过 `androidx.sqlite:sqlite-bundled` 的
+  `BundledSQLiteDriver` 运行，不依赖宿主机 libsqlite。
+- ORM：Room3（`androidx.room3`）。schema 由 KSP 生成，导出到
+  `server/schemas/`。
+- 路径：`DATABASE_PATH`，默认 `esp32-control.db`；相对路径基于进程工作目录。
+- 表：
+  - `devices`：设备快照、开/关码、`revision`、最近动作。
+  - `device_tombstones`：移除时间与 revision，保留 24h。
+  - `commands`：命令记录与最终状态。
+  - `idempotency`：幂等 key → commandId，TTL 10min。
+- 事务：跨表写入使用 `withWriteTransaction`；MQTT 发布不在事务内，
+  避免网络阻塞数据库锁。
+- 运行时状态：
+  - 网关在线状态与接收器证据不持久化；服务端重启后先按 offline 处理，
+    由 retained LWT/version 恢复。
+  - 命令没有“进行中”的持久状态：幂等记录在发布前写入，
+    命令记录在发布收尾时写入；重启不重发任何命令。
+  - 学习会话与候选只存在于服务端内存，不写数据库。重启后未保存的会话
+    全部丢失，客户端轮询得到 `404 learning_session_not_found`，需要重新开始；
+    已 `confirm` 的设备不受影响。
+- 启动时把所有已存设备的 `online` 置为 `false`，避免把历史状态当成实时在线。
 
 ---
 
@@ -290,7 +332,7 @@ CommandExecutor ──► MqttPublisher
 
 | 规则 | 约定 |
 | --- | --- |
-| Media type | `application/json; charset=utf-8`；SSE 为 `text/event-stream` |
+| Media type | `application/json; charset=utf-8` |
 | 字段名 | `lowerCamelCase`，与 Kotlin 属性名一致 |
 | 枚举 | 线上小写 snake_case，`@SerialName` 固定 |
 | 时间 | UTC epoch milliseconds，`Long`，字段以 `EpochMs` 结尾 |
@@ -314,12 +356,12 @@ val ContractJson = Json {
 
 | Header | 方向 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `Accept` | 请求 | 建议 | `application/json` 或 `text/event-stream` |
+| `Accept` | 请求 | 建议 | `application/json` |
 | `Content-Type` | 请求 | POST 必填 | `application/json` |
 | `X-Request-Id` | 请求 | 否 | 客户端可传；服务端回显 |
 | `Idempotency-Key` | 请求 | 命令必填 | 1–64 字符 |
 | `X-Request-Id` | 响应 | 是 | 服务端生成/回显 |
-| `Cache-Control` | 响应 | 是 | API 为 `no-store`；SSE 为 `no-cache` |
+| `Cache-Control` | 响应 | 是 | 所有 API 响应为 `no-store` |
 | `Idempotent-Replayed` | 响应 | 否 | `true` 表示命中了幂等缓存 |
 
 ### 4.4 幂等
@@ -348,14 +390,15 @@ val ContractJson = Json {
 | 学习候选上限 | 每会话 32 个（含历史槽位） |
 | 抓码去重窗口 | 400 ms（与按键帧合并窗口一致） |
 | 设备 tombstone 保留 | 24 h（可配置） |
-| 学习会话终态保留 | 5 min（之后 `404`） |
-| SSE 重放缓冲 | 256 条 / 5 min |
+| 学习会话终态保留 | 5 min（之后 `404`；进程重启立即丢失） |
+| 空闲设备列表轮询 | 30 s |
+| 学习会话轮询 | 1 s |
 
 ### 4.6 CORS 与安全边界
 
 - 开发：允许 `*`；生产：Origin 白名单。
 - 方法：`GET, POST, DELETE, OPTIONS`。
-- 请求头：`Accept, Content-Type, Idempotency-Key, X-Request-Id, Last-Event-ID`。
+- 请求头：`Accept, Content-Type, Idempotency-Key, X-Request-Id`。
 - 暴露头：`X-Request-Id`、`Idempotent-Replayed`。
 - 不使用 Cookie/凭据（v1）。
 - v1 无鉴权，仅限可信局域网；远程部署必须加认证与 TLS。
@@ -441,7 +484,7 @@ stateDiagram-v2
 | 状态 | 是否出现在列表 | 是否可控制 | 说明 |
 | --- | --- | --- | --- |
 | `active` | 是 | 是 | 正常设备 |
-| `removing` | 否 | 否 | 请求内的瞬态，持有设备锁 |
+| `removing` | 否 | 否 | DELETE 写事务内的瞬态，不对外可见 |
 | `removed` | 否 | 否 | tombstone；`GET` 返回 `410` |
 
 外部 API 不暴露 `removing`。设备一旦 `removed` 就是终态：
@@ -457,32 +500,32 @@ stateDiagram-v2
 stateDiagram-v2
     [*] --> Validated: 请求通过所有 guard
     Validated --> Dispatched: MQTT 发布成功
-    Dispatched --> Confirmed: 2s 内收到匹配捕获（可选）
     Validated --> Cancelled: 设备在发布前被移除
     Validated --> Failed: 发布失败
     Cancelled --> [*]
     Failed --> [*]
-    Confirmed --> [*]
-    Dispatched --> [*]: 单向链路，未确认也视为终态
+    Dispatched --> [*]: 单向链路，发布即终态
 ```
 
 | 状态 | 含义 | 客户端显示 |
 | --- | --- | --- |
-| `dispatched` | 已发布到 MQTT / 演示模式已模拟 | “已下发/等待确认” |
-| `confirmed` | 收到匹配 RF 码（可选） | “已确认” |
+| `dispatched` | 已发布到 MQTT | “已下发” |
 | `failed` | 发布或内部处理失败 | “下发失败” |
 | `cancelled` | 设备在发布前被移除 | “已取消” |
 
 关键规则：
 
-- **`dispatched` 是正常终态**。315MHz 无 ACK，不能因为没收到捕获就判失败。
-- `confirmed` 是增强信息：2 秒内收到与发送码相同的捕获才进入；仍不能区分
-  是命令回波还是用户按了同一个遥控器，因此只作为“观察到”而非严格 ACK。
-- 命令记录只在校验通过后创建；校验失败直接返回 HTTP 错误，不产生命令。
-- `GET /commands/{id}` 用于轮询状态；SSE `command.updated` 用于推送。
-- 同一设备同一时刻只允许一个“校验中→发布中”的命令；并发请求返回
-  `409 command_in_progress`。
-- 幂等重放不重新发布，只返回同一 `commandId` 的当前记录。
+- **`dispatched` 是正常终态**。MQTT PUBACK 只证明 Broker 接收，
+  315MHz 无 ACK，服务端不推断设备是否执行。
+- 不提供 TX 回显确认：网关通常听不到自己的发射，即使收到也无法区分
+  是命令回波还是用户按了同一个遥控器。
+- 命令记录在发布收尾（成功、失败、或发布前发现设备已移除）时创建；
+  校验失败直接返回 HTTP 错误，不产生命令。
+- `GET /commands/{id}` 用于读取命令记录，不用于等待状态变化。
+- 服务端不维护“进行中”的命令状态。同一设备允许连续或并发下发命令，
+  各自独立发布；命令发布完成即进入终态。
+- 幂等重放不重新发布，只返回同一 `commandId` 的记录；原命令尚未写入
+  记录时返回 `409 command_in_progress`。
 
 ### 5.4 学习会话状态机
 
@@ -597,7 +640,6 @@ stateDiagram-v2
 | 接收器 `receiving` | 允许控制 | 允许 | 允许 | 允许 |
 | 有活动学习会话 | 允许 | `409 learning_busy` | 仅当前会话 | 允许 |
 | 设备 `removed` | `410 device_removed` | 允许（学新设备） | — | `204`（幂等） |
-| 命令 `validated` 中 | `409 command_in_progress` | 允许 | — | 允许；未发布命令转 `cancelled` |
 | 学习会话 `ready` | 允许 | `409 learning_busy` | 允许 | 允许 |
 
 ---
@@ -646,8 +688,7 @@ enum class DeviceState {
 
 @Serializable
 enum class StateEvidence {
-    @SerialName("reported") REPORTED,     // 由捕获/网关上报观察到
-    @SerialName("commanded") COMMANDED,   // 仅由命令推断，未确认
+    @SerialName("commanded") COMMANDED,   // 由命令推断
     @SerialName("unknown") UNKNOWN,       // 无任何可靠信息
 }
 
@@ -661,7 +702,7 @@ enum class ActionType {
 | 字段 | 说明 |
 | --- | --- |
 | `state` | 最佳已知逻辑状态；不是传感器读数 |
-| `stateEvidence` | `reported` / `commanded` / `unknown`，说明状态来自哪里 |
+| `stateEvidence` | `commanded` / `unknown`，说明状态是否仅由命令推断 |
 | `online` | 服务端认为当前是否可控制：设备 active 且网关 `online`；RF 设备没有独立心跳 |
 | `codeOn` / `codeOff` | RF 码值，非负；当前 315M/24bit 范围 `0..16777215` |
 | `rf.protocol` / `rf.length` | 该设备码的协议和位宽；同对开/关码必须一致 |
@@ -746,7 +787,6 @@ data class HealthResponse(
     val runtime: String,
     val uptimeSeconds: Long,
     val serverTimeEpochMs: Long,
-    val dataSource: DataSource,
     val gateway: GatewayStatus,
 )
 ```
@@ -760,7 +800,6 @@ data class HealthResponse(
 | `gateway.receiver.state` | `unknown` / `receiving` / `unavailable`；由捕获和可选固件状态推断 |
 | `gateway.receiver.lastCaptureAtEpochMs` | 最近一条合法捕获；从未收到为 `null` |
 | `gateway.receiver.captureCount` | 本次服务端启动/网关重连后收到的合法捕获数 |
-| `dataSource` | `in-memory-demo` 或 `mqtt` |
 
 示例：
 
@@ -769,11 +808,10 @@ data class HealthResponse(
   "status": "ok",
   "service": "esp32-control-server",
   "apiVersion": "1",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "runtime": "Kotlin/Native",
   "uptimeSeconds": 42,
   "serverTimeEpochMs": 1760000000000,
-  "dataSource": "mqtt",
   "gateway": {
     "state": "online",
     "version": "v1.7.0",
@@ -807,7 +845,6 @@ enum class CommandAction {
 @Serializable
 enum class CommandStatus {
     @SerialName("dispatched") DISPATCHED,
-    @SerialName("confirmed") CONFIRMED,
     @SerialName("failed") FAILED,
     @SerialName("cancelled") CANCELLED,
 }
@@ -820,7 +857,6 @@ data class CommandRecord(
     val status: CommandStatus,
     val requestedAtEpochMs: Long,
     val dispatchedAtEpochMs: Long?,
-    val confirmedAtEpochMs: Long?,
     val failureReason: String?,
 )
 
@@ -842,7 +878,6 @@ data class CommandAccepted(
     "status": "dispatched",
     "requestedAtEpochMs": 1760000005000,
     "dispatchedAtEpochMs": 1760000005001,
-    "confirmedAtEpochMs": null,
     "failureReason": null
   },
   "device": { "...": "见 6.1" }
@@ -1003,37 +1038,24 @@ data class LearningTestResult(
 > `frameCount` 与 `hitCount` 的差异是刻意保留的：一次按键通常产生多帧，
 > 客户端应展示“3 次按键 / 7 帧”，而不是把 7 帧误读成 7 次按键。
 
-### 6.5 事件
+### 6.5 实时性与快照
 
-SSE 事件是扁平 JSON，`type` 为判别字段：
+v1.2.0 不提供事件流。所有状态变化通过快照接口读取：
 
-```json
-{
-  "type": "device.updated",
-  "eventId": "evt_01JB2Z9A...",
-  "atEpochMs": 1760000006000,
-  "device": { "...": "Device" }
-}
-```
-
-类型：
-
-| `type` | 额外字段 | 触发 |
+| 数据 | 接口 | 建议轮询 |
 | --- | --- | --- |
-| `gateway.updated` | `gateway: GatewayStatus` | LWT/版本变化 |
-| `device.added` | `device: Device` | 学习确认成功 |
-| `device.updated` | `device: Device` | 状态/动作/revision 变化 |
-| `device.removed` | `deviceId`, `removedAtEpochMs`, `revision` | 移除完成 |
-| `command.updated` | `command: CommandRecord` | 命令状态变化 |
-| `learning.updated` | `session: LearningSession` | 会话状态、候选 `hitCount` 或 `accepted` 变化 |
-| `stream.reset` | `reason: String` | 事件缓冲无法重放 |
+| 设备列表 | `GET /devices` | 空闲 30 s；控制后立即刷新 |
+| 单设备 | `GET /devices/{id}` | 按需 |
+| 命令 | `GET /commands/{id}` | 按需查阅；命令发布后状态不再变化 |
+| 学习会话 | `GET /learning/sessions/{id}` | 学习进行中 1 s |
+| 网关/接收器 | `GET /health` | 30 s；学习页进入时立即 |
 
-```kotlin
-sealed class ServerEvent {
-    abstract val eventId: String
-    abstract val atEpochMs: Long
-}
-```
+一致性规则：
+
+- 每个 `Device`、`LearningSession` 带 `revision`；客户端只接受更大的 revision。
+- 请求响应与轮询返回同一 DTO，客户端不为不同来源写两套解析逻辑。
+- 快照是最终依据；客户端不尝试拼接增量或补齐历史。
+- 轮询失败不清空已有数据，保留上次快照并提示连接问题。
 
 ### 6.6 错误
 
@@ -1070,21 +1092,15 @@ sealed class ServerEvent {
 2. 设备存在且未移除 → `404 device_not_found` / `410 device_removed`
 3. 网关 `online` → 否则 `503 gateway_unavailable`
 4. 设备可控制（`online=true`）→ 否则 `409 device_offline`
-5. 同设备没有进行中的命令 → 否则 `409 command_in_progress`
-6. 请求体 action 合法 → 否则 `400 invalid_request`
-7. `Idempotency-Key` 合法 → 否则 `400 invalid_request`
-8. 查看幂等缓存：命中同 key + 同 body → 返回原 `commandId`（`Idempotent-Replayed: true`），不再发布
+5. 请求体 action 合法 → 否则 `400 invalid_request`
+6. `Idempotency-Key` 合法 → 否则 `400 invalid_request`
+7. 查看幂等缓存：命中同 key + 同 body → 返回原 `commandId`（`Idempotent-Replayed: true`），不再发布
 
 ### 7.2 执行步骤
 
 1. 生成 `commandId`（ULID）。
-2. 在设备锁内创建内部状态为 `validated` 的 `CommandRecord`。
-3. 把 `Device.state` 设为动作目标：
-   - `turn_on` → `state=on`
-   - `turn_off` → `state=off`
-   - `stateEvidence=commanded`
-   - `lastAction={type,t atEpochMs, commandId}`
-   - `revision++`
+2. 在写事务内记录幂等 key（`Idempotency-Key` → `commandId`）。
+3. 重新确认设备仍然存在；已移除则写入 `cancelled` 记录并返回 `410`，不发布。
 4. 发布 MQTT：
    - 主题：`home/OpenMQTTGateway/commands/MQTTto315`
    - payload：
@@ -1093,9 +1109,13 @@ sealed class ServerEvent {
      ```
    - `turn_on` 用 `codeOn`，`turn_off` 用 `codeOff`
    - QoS 1
-5. 发布成功 → `CommandRecord.status=dispatched`，`dispatchedAtEpochMs` 填充。
-6. 返回 `202 CommandAccepted { command, device }`。
-7. 事件：`command.updated`、`device.updated`。
+5. 在写事务内收尾：
+   - 发布成功且设备仍存在 → 把 `Device.state` 设为动作目标
+     （`stateEvidence=commanded`、更新 `lastAction`、`revision++`），
+     写入 `CommandRecord.status=dispatched` 与 `dispatchedAtEpochMs`；
+   - 发布成功但设备已被移除 → 命令保持 `dispatched`，返回 `410`；
+   - 发布失败 → 命令记录 `failed`，返回 `503`。
+6. 返回 `202 CommandAccepted { command, device }`。此后命令状态不再变化。
 
 ### 7.3 失败与并发
 
@@ -1104,27 +1124,26 @@ sealed class ServerEvent {
 | 网关离线 | `503 gateway_unavailable`；命令不创建 |
 | 设备已移除 | `410 device_removed` |
 | 设备离线 | `409 device_offline` |
-| 同设备命令进行中 | `409 command_in_progress` |
-| MQTT 发布失败 | `503 gateway_unavailable`；命令记录 `failed`（若已创建） |
+| 同一幂等 key 的原命令仍在发布中 | `409 command_in_progress`（原命令记录尚未写入） |
+| 同设备并发命令（不同 key） | 各自发布；设备状态以最后提交的收尾事务为准 |
+| MQTT 发布失败 | `503 gateway_unavailable`；命令记录 `failed` |
 | 客户端超时后重试 | 复用同一 `Idempotency-Key`，不会重复发射 |
 | 设备在发布前被移除 | 命令 `cancelled`，不发布 |
 | 设备在发布后被移除 | 命令保持 `dispatched`，物理动作无法撤回 |
 
-### 7.4 可选确认
+### 7.4 无确认路径
 
-- 服务端在发布后 2 秒内观察 `315toMQTT`：
-  - 收到同 `value/protocol/length` 的捕获 → `status=confirmed`，
-    `confirmedAtEpochMs` 填充，设备 `stateEvidence=reported`，`revision++`。
-  - 没收到 → 保持 `dispatched`，**不判失败**。
-- 由于 mock 不回显 TX，演示模式下永远是 `dispatched`；
-  这是预期行为，不是 bug。
-- SSE `command.updated` 让所有客户端看到确认变化。
+- MQTT QoS 1 只保证 Broker 接收，315MHz 发射没有协议层 ACK。
+- 网关的接收器通常听不到自己的发射；即使听到，也只证明“空中有同码信号”，
+  不能证明目标开关执行了动作。
+- 因此 v1.2.0 不提供 TX 回显确认，`dispatched` 是终态；网关抓码只用于学习。
+- 客户端不应轮询命令等待执行结果，UI 只能展示“已下发”。
 
 ### 7.5 客户端交互
 
 - 点击开关时根据当前 `state` 计算动作，生成新幂等 key。
-- pending 期间禁用该设备开关；卡片显示“已下发/等待确认”。
-- 收到 202 后用响应中的 `device` 更新；若 SSE 稍后推送更高 `revision`，以 SSE 为准。
+- pending 期间禁用该设备开关；卡片显示“已下发”。
+- 收到 202 后用响应中的 `device` 更新；后续轮询到更高 `revision` 时以轮询结果为准。
 - 网关离线时禁用全部控制按钮，并显示“网关离线”。
 - 收到 `410 device_removed` 时移除卡片并提示设备已被移除。
 
@@ -1148,8 +1167,8 @@ sealed class ServerEvent {
 - `candidates=[]`，`candidateExpiresAtEpochMs=null`。
 - 获取全局学习锁（同一时间只有一个会话）。
 - 打开服务端关联窗口：窗口内到达的网关捕获才允许进入该会话。
-- 返回 `201 LearningSession`。
-- 事件 `learning.updated`。
+- 返回 `201 LearningSession`；客户端随后以 1 s 轮询刷新。
+- 会话保存在服务端内存，不落库；进程重启即失效。
 
 **不会向 MQTT 命令主题发布任何东西。** 但这不代表网关“不参与”：
 网关的 315MHz 接收器在硬件侧持续工作，服务端只是在等它上报。
@@ -1182,17 +1201,17 @@ OMG 315 没有标准的“开始学习”指令，服务端无法远程打开一
 | 4 | Remote → Gateway | 315MHz | RF 码（可能多帧） | — |
 | 5 | Gateway → Broker | MQTT `315toMQTT` | `{"value":1714739,"protocol":1,"length":24,"delay":330}` | — |
 | 6 | Broker → Server | MQTT | 同码多帧 | 按 `(protocol,length,value)` 聚类；合并为 1 次按键；`hitCount=1/3`；`receiver.state=receiving` |
-| 7 | Server → Client | SSE `learning.updated` | 完整 session + candidates | — |
+| 7 | Client → Server | `GET /learning/sessions/{id}`（1s 轮询） | 完整 session + candidates | — |
 | 8 | User → Remote | 物理按键（开键第 2、3 次） | 与第 1 次间隔 ≥600ms | `hitCount=2/3`、`3/3` |
-| 9 | Server → Client | SSE `learning.updated` | 候选达标 | 停止开码采集 → `candidate_on_ready`；30s 确认窗口 |
+| 9 | Client → Server | `GET /learning/sessions/{id}` | 候选达标 | 停止开码采集 → `candidate_on_ready`；30s 确认窗口 |
 | 10 | Client → Server | `POST .../candidates/{id}/accept` | 无 body | 接受开码候选 → `collecting_off`；保留已接受开码候选，后续捕获追加关码候选；60s 采集窗口 |
-| 11 | Server → Client | HTTP 200 + SSE | 更新后的 session | — |
+| 11 | Server → Client | HTTP 200 | 更新后的 session | — |
 | 12 | User → Remote | 物理按键（关键 3 次） | 与开键不同的码 | 同一套聚类；关码 `hitCount=3/3` |
-| 13 | Server → Client | SSE `learning.updated` | 候选达标 | `candidate_off_ready`；30s 确认窗口 |
+| 13 | Client → Server | `GET /learning/sessions/{id}` | 候选达标 | `candidate_off_ready`；30s 确认窗口 |
 | 14 | Client → Server | `POST .../candidates/{id}/accept` | 无 body | 接受关码候选 → `ready`；5min 保存窗口 |
 | 15 | Client → Server | `POST .../test`（可选） | `{slot}` | 试发已接受码，不创建设备 |
 | 16 | Client → Server | `POST .../confirm` | `{name, location}` | 校验已接受码对/冲突 → 创建设备 + 码归属 → `completed` |
-| 17 | Server → Client | HTTP 201 + SSE | `LearningConfirmation`、`device.added`、`learning.updated` | — |
+| 17 | Server → Client | HTTP 201 | `LearningConfirmation`；客户端刷新设备列表 | — |
 
 注意步骤 4–13：**没有“网关学习请求/响应”握手**。捕获是网关单向上报的异步事件；
 服务端不能要求网关“再发一次”，只能提示用户再按一次遥控器。
@@ -1240,9 +1259,7 @@ OMG 315 没有标准的“开始学习”指令，服务端无法远程打开一
    - 不再接受新捕获进入当前槽位；晚到的帧被忽略并记日志。
    - 只有客户端 `accept` 或 `rescan` 能离开该状态。
 10. **窗口外**：超过 `collectionExpiresAtEpochMs` 的捕获不再进入当前槽位。
-11. **自身发射回显**：若网关回显了服务端刚发出的码（2 秒内同码），
-    仅用于命令确认，不参与学习候选计数。
-12. **关联依据**：v1 单网关、单活动会话，用“当前槽位采集窗口 + 主题 + 候选键”关联；
+11. **关联依据**：v1 单网关、单活动会话，用“当前槽位采集窗口 + 主题 + 候选键”关联；
     捕获本身没有 `sessionId`。若未来多网关，必须在捕获负载中增加
     `gatewayId` 或由不同主题前缀隔离，不能靠时间窗口猜。
 
@@ -1311,8 +1328,7 @@ OMG 315 没有标准的“开始学习”指令，服务端无法远程打开一
   - 使用已接受候选的码发布 MQTT，使用默认 `repeat=5`；
   - 生成独立的 `testId`，不写入设备命令表；
   - 返回 `202 LearningTestResult`；
-  - 用户需目视/听觉确认设备是否动作；服务端不等待物理确认；
-  - 同一会话 2 秒内最多试发一次，避免 RF 拥塞。
+  - 用户需目视/听觉确认设备是否动作；服务端不等待物理确认。
 - **重新采集** `POST .../rescan`：
   - 允许在 `collecting_on`、`candidate_on_ready`、`collecting_off`、
     `candidate_off_ready` 使用；
@@ -1366,8 +1382,8 @@ OMG 315 没有标准的“开始学习”指令，服务端无法远程打开一
 - 设备注册表新增一条记录（初始 `state=unknown`）。
 - 码归属索引新增两条：`(protocol,length,codeOn)` 和 `(protocol,length,codeOff)`；
   来源分别是 `acceptedOnCandidateId` / `acceptedOffCandidateId` 对应的候选码。
-- 设备列表/SSE 新增 `device.added`。
-- 学习会话从活动锁中移除，进入终态保留。
+- 设备列表新增该设备（`confirm` 响应 + 后续轮询）。
+- 学习会话从活动锁中移除，进入终态保留（仅内存，重启即丢失）。
 - 后续控制该设备时，`turn_on` 使用 `codeOn`，`turn_off` 使用 `codeOff`。
 - 候选列表不持久化为设备；只有 `confirm` 成功后两个已接受候选才进入码归属索引。
 
@@ -1387,18 +1403,15 @@ OMG 315 没有标准的“开始学习”指令，服务端无法远程打开一
 active --DELETE--> removing --清理--> removed
 ```
 
-在设备锁内执行：
+在单个写事务内执行：
 
-1. 标记 `removing`，立即拒绝该设备的新命令。
-2. 扫描该设备的命令：
-   - `validated`（尚未发布）→ `cancelled`；
-   - `dispatched` 已发布 → 无法撤回，保持原状态并记录审计。
-3. 从码归属索引删除 `codeOn`、`codeOff`。
-4. 从设备列表删除。
-5. 写 tombstone：`deviceId`、`removedAtEpochMs`、最终 `revision`。
-6. 标记 `removed`，释放设备锁。
-7. 事件 `device.removed`。
-8. 返回 `204 No Content`。
+1. 设备不存在：有 tombstone 则幂等返回 `204`，否则 `404 device_not_found`。
+2. 删除设备行；`codeOn` / `codeOff` 随行释放，可被新的学习会话重新捕获。
+3. 写 tombstone：`deviceId`、`removedAtEpochMs`、最终 `revision`。
+4. 提交后返回 `204 No Content`。
+
+尚未发布的命令在下一步的发布前检查中看到设备已不存在，记为 `cancelled`
+且不发布；已发布的命令无法撤回，保持 `dispatched`。
 
 ### 9.3 API 行为
 
@@ -1414,7 +1427,7 @@ active --DELETE--> removing --清理--> removed
 
 ### 9.4 移除后的数据流
 
-- 所有客户端通过 SSE `device.removed` 移除卡片。
+- 所有客户端在下次 `GET /devices` 轮询时不再看到该设备。
 - 该设备的码不再属于任何 active 设备；可被新的学习会话重新捕获并绑定。
 - 旧 tombstone 不阻止重新学习；重新学习会得到新 `deviceId`。
 - 若移除时已有 `dispatched` 命令，命令记录仍可查询（审计），但 UI 不再展示设备。
@@ -1422,60 +1435,23 @@ active --DELETE--> removing --清理--> removed
 
 ### 9.5 与命令的竞态
 
-- 命令校验与删除都在设备锁内，二者串行。
-- 先拿到锁的命令：若尚未发布，删除会将其置为 `cancelled`；
-  若已发布，删除不回滚物理动作。
-- 先拿到锁的删除：后续命令看到 `removed`，返回 `410`。
+- 命令校验、发布前检查与删除各自在写事务内执行；MQTT 发布在事务外。
+- 删除先提交：命令在发布前检查中看到设备不存在，记 `cancelled`、不发布，
+  返回 `410`。
+- 命令先发布：删除不回滚物理动作；收尾时设备已不存在，命令仍记
+  `dispatched`，请求返回 `410`。
 - 客户端收到 `409 command_in_progress` 或 `410` 时应刷新设备列表。
 
 ---
 
-## 10. 事件流（SSE）与轮询降级
+## 10. 轮询与一致性
 
-### 10.1 为什么需要事件流
+### 10.1 为什么使用轮询
 
 学习依赖网关异步抓码，控制确认和移除也发生在 HTTP 请求之后。
-仅靠请求-响应或 30 秒轮询无法满足学习 UI 的实时性，因此 v1 增加 SSE。
+v1.2.0 明确不提供事件流：客户端按场景轮询快照，服务端只维护状态。
 
-### 10.2 连接
-
-```
-GET /api/v1/events
-Accept: text/event-stream
-Last-Event-ID: <last-seen-event-id>   # 重连时可带
-```
-
-响应：
-
-```
-HTTP/1.1 200 OK
-Content-Type: text/event-stream; charset=utf-8
-Cache-Control: no-cache
-Connection: keep-alive
-
-retry: 3000
-
-id: evt_01JB2Z9A...
-event: learning.updated
-data: {"type":"learning.updated","eventId":"evt_01JB2Z9A...","atEpochMs":1760000012500,"session":{...}}
-
-: heartbeat
-```
-
-规则：
-
-- 每条事件 `data` 是一个完整的 `ServerEvent` JSON。
-- `event:` 与 JSON 的 `type` 相同。
-- 每 15 秒发送 `: heartbeat` 注释。
-- 服务端保留 256 条/5 分钟；`Last-Event-ID` 仍在缓冲内则补发，
-  否则先发 `stream.reset`，客户端重新拉取快照。
-- SSE 断线后客户端指数退避重连；重连成功先拉 `health` + `devices`，
-  再消费事件，按 `revision` 丢弃旧数据。
-- SSE 是单向的；控制/学习/删除仍走 HTTP。
-
-### 10.3 轮询降级
-
-不支持 SSE 或连接不稳定时：
+### 10.2 轮询策略
 
 | 场景 | 轮询 |
 | --- | --- |
@@ -1484,14 +1460,19 @@ data: {"type":"learning.updated","eventId":"evt_01JB2Z9A...","atEpochMs":1760000
 | 命令状态 | `GET /commands/{id}` 每 500 ms，最多 10 s |
 | 网关状态 | 随 `GET /health` 每 30 s |
 
-轮询与 SSE 使用同一套 DTO 和 revision，客户端逻辑不分叉。
+规则：
 
-### 10.4 事件与快照的一致性
+- 页面不可见时暂停轮询；恢复可见时立即拉一次快照。
+- 学习会话进入终态（`completed/expired/failed/cancelled`）后停止 1 s 轮询。
+- 控制/学习写操作成功后立即刷新相关快照，不等待下一个轮询周期。
+- 轮询失败按有界退避重试，不清空已展示数据。
 
-- 所有实体变更先写服务端状态，再发事件；事件中的 `revision` 是变更后的值。
-- 客户端维护每个设备/会话/命令的最大 `revision`；收到更旧的事件直接忽略。
-- 收到 `stream.reset` 或 revision 跳跃 → 重新拉取快照，不尝试补齐。
-- 事件不保证跨实体全局顺序；同一实体的顺序由 revision 保证。
+### 10.3 快照一致性
+
+- 所有实体变更先提交到 SQLite，再返回响应；响应中的 `revision` 是变更后的值。
+- 客户端维护每个设备/会话/命令的最大 `revision`；更旧的快照直接忽略。
+- revision 跳跃或本地状态与快照冲突时，以服务端快照为准，不尝试补齐。
+- 快照不保证跨实体全局顺序；同一实体的顺序由 revision 保证。
 
 ---
 
@@ -1608,7 +1589,6 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - 202 `LearningTestResult`
 - 409 `learning_not_ready`
 - 503 `gateway_unavailable`
-- 429 `rate_limited`（2 秒内重复试发）
 - 使用已接受的候选码；不创建设备、不写命令表。
 
 ### 11.12 `POST .../confirm`
@@ -1632,13 +1612,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 
 - 204
 - 幂等
-- 事件 `learning.updated`（state=`cancelled`）
-
-### 11.14 `GET /api/v1/events`
-
-- `200 text/event-stream`
-- 事件类型见第 6.5、10 节
-- 支持 `Last-Event-ID`
+- 会话状态变为 `cancelled`；后续 `GET` 在保留期内返回该终态
 
 ---
 
@@ -1653,7 +1627,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 | `device_not_found` | 404 | 设备不存在 |
 | `device_removed` | 410 | 设备已移除 |
 | `device_offline` | 409 | 设备不可控制 |
-| `command_in_progress` | 409 | 同设备已有进行中命令 |
+| `command_in_progress` | 409 | 同一幂等 key 的原命令仍在发布中 |
 | `command_not_found` | 404 | 命令不存在 |
 | `idempotency_conflict` | 409 | 同 key 不同请求体 |
 | `gateway_unavailable` | 503 | 网关离线/发布失败 |
@@ -1665,7 +1639,6 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 | `candidate_not_ready` | 409 | 候选未达标/已接受/与当前槽位不符 |
 | `code_already_registered` | 409 | 码已被 active 设备占用 |
 | `code_pair_invalid` | 422 | 两码相同/协议不一致/范围错误 |
-| `rate_limited` | 429 | 试发/学习/命令限流 |
 | `route_not_found` | 404 | 未知路径 |
 | `method_not_allowed` | 405 | 方法不支持 |
 | `internal_error` | 500 | 未预期错误 |
@@ -1677,12 +1650,21 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 ## 13. 版本演进与兼容
 
 - 路径版本 `/api/v1`，`HealthResponse.apiVersion = "1"`。
-- `contract` 模块语义版本 `CONTRACT_VERSION = "1.1.0"`。
+- `contract` 模块语义版本 `CONTRACT_VERSION = "1.2.0"`。
   - `1.1.0`（2026-11-03）：学习改为“按键聚类 + 候选确认”模型；
     新增 candidate accept / rescan，移除旧的重学/手动指定接口。
-    这是**预实现修订**：当前尚无客户端/服务端实现，因此不保留旧枚举/端点的兼容层，
+  - `1.2.0`（2026-11-03）：移除 SSE 事件类型与 `GET /api/v1/events`；
+    服务端改用 SQLite + Room3 持久化，MQTT 客户端改为 ktor-mqtt；
+    MQTT 为必需配置，移除 `DataSource` 与无 MQTT 的本地模式；
+    移除 TX 回显确认路径，删除 `CommandStatus.confirmed`、
+    `StateEvidence.reported` 与 `confirmedAtEpochMs`；
+    移除服务端设备级发布锁，不同 key 的并发命令不再互斥，
+    `command_in_progress` 仅保留给同一幂等 key 的原命令未写入记录的窗口；
+    学习会话与候选改为纯内存状态，删除 `learning_sessions` /
+    `learning_candidates` 表（数据库 v3）。
+    这是**预实现修订**：当前尚无外部 v1 客户端依赖事件流，因此不保留旧端点/类型的兼容层，
     也不触发 `/api/v2`。一旦 v1 正式发布，同类语义变更必须走 v2。
-- 允许：新增响应字段、新增端点、新增错误码、新增事件类型（旧客户端忽略）。
+- 允许：新增响应字段、新增端点、新增错误码（旧客户端忽略未知字段）。
 - 需要客户端先行：新增枚举值（严格反序列化会失败）。
 - 破坏性：删除/重命名字段、改变类型/语义、改变状态码、改变状态机语义
   → `/api/v2`。
@@ -1691,10 +1673,9 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
   - 新增枚举值：客户端先。
   - 删除旧路由/字段：等所有客户端升级。
 - 合同测试：`contract/src/commonTest/resources/golden/` 覆盖：
-  - 设备（unknown/commanded/reported）
-  - 命令（dispatched/confirmed/cancelled）
+  - 设备（unknown/commanded）
+  - 命令（dispatched/cancelled）
   - 学习会话（collecting_on/candidate_on_ready/collecting_off/candidate_off_ready/ready/completed/expired）
-  - 事件（每种 type）
   - 错误（code_already_registered/code_pair_invalid）
   - 三端同 fixture 解码；服务端编码结果与 fixture 对齐。
 
@@ -1707,9 +1688,8 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 1. 网关 `offline` 或设备 `online=false` → 禁用按钮。
 2. 点击 → 根据 `state` 计算 `turn_on`/`turn_off`，生成新幂等 key。
 3. pending 时禁用该卡片；202 后按响应 `device` 更新。
-4. SSE `device.updated` 的 `revision` 更大时覆盖本地。
-5. `dispatched` 显示“已下发”，`confirmed` 显示“已确认”；
-   `stateEvidence=commanded` 时不宣称物理状态已确认。
+4. 轮询到更高 `revision` 的 `device` 时覆盖本地。
+5. `dispatched` 显示“已下发”；`stateEvidence=commanded` 时不宣称物理状态已确认。
 6. 410 → 移除卡片。
 
 ### 14.2 学习
@@ -1719,7 +1699,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
    - `gateway.receiver.state=unavailable` 时禁用开始按钮；
    - `unknown` 时允许开始，但提示“尚未观察到 RF 信号”。
 2. `POST sessions`。
-3. 订阅 SSE；若 2 秒内未建立，降级为 1 秒轮询。
+3. 每 1 秒轮询会话，直到进入终态。
 4. 根据 `state` 展示步骤：
    - `collecting_on`：提示“请连续按开键 3 次”；展示当前最高候选的
      `hitCount/requiredHits`（例如 `2/3`）和槽位倒计时。
@@ -1740,8 +1720,8 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
    每次间隔约 1 秒”，并提供“重新采集”。
 8. `expired(candidate_timeout)`：提示候选确认超时，可重新开始。
 9. `failed`/`cancelled`：停止轮询，展示原因和“重新开始”。
-10. 保存成功 → 使用返回的 `LearningConfirmation.device` 跳转；
-    若 `device.added` 先到，按 id 去重。
+10. 保存成功 → 使用返回的 `LearningConfirmation.device` 跳转，
+    并立即刷新设备列表。
 11. 离开页面时若会话仍活动 → 调用 DELETE 取消（或等待过期）。
 
 ### 14.3 移除
@@ -1749,26 +1729,24 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 1. 二次确认 → `DELETE`。
 2. 204 → 移除卡片；410/404 同样视为已不存在。
 3. 若收到 409/网络错误 → 刷新列表，不要凭猜测删除。
-4. SSE `device.removed` 处理其他客户端发起的移除。
+4. 其他客户端发起的移除在下次 `GET /devices` 轮询中体现。
 
 ### 14.4 重连与一致性
 
 - 启动/重连：`GET health` + `GET devices`，记录 revision。
-- 连接 SSE，带 `Last-Event-ID`。
-- 收到 `stream.reset`：重新拉快照。
-- 不依赖事件补齐历史状态；快照是最终依据。
+- 按第 10 节的周期轮询；页面恢复可见时立即拉一次快照。
+- 网络恢复后先拉快照，再恢复轮询；不依赖增量补齐。
+- 快照是最终依据。
 
 ### 14.5 本地化映射
 
 | 契约值 | 中文 |
 | --- | --- |
 | `state=on` + `stateEvidence=commanded` | 已开启（已下发） |
-| `state=on` + `stateEvidence=reported` | 运行中 |
 | `state=off` | 已停止 |
 | `state=unknown` | 状态未知 |
 | `lastAction=null` | 待机 |
 | `command.status=dispatched` | 已下发 |
-| `command.status=confirmed` | 已确认 |
 | `command.status=cancelled` | 已取消 |
 | `learning.state=collecting_on` | 请连续按遥控器开键 3 次 |
 | `learning.state=candidate_on_ready` | 已识别到开码候选，请确认 |
@@ -1791,9 +1769,9 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - 只接受来自配置主题的网关捕获；禁止客户端直接提交 RF 码。
 - 速率限制建议：
   - 每设备命令：10 次/分钟；
-  - 学习开始：5 次/小时；
-  - 试发：1 次/2 秒/会话。
-- tombstone 与审计日志保留 24h（v1 内存）；生产需持久化。
+  - 学习开始：5 次/小时。
+- tombstone 与命令/学习记录持久化在 SQLite；tombstone 保留 24h。
+  鉴权与审计日志仍待生产环境补齐。
 
 ---
 
@@ -1808,6 +1786,18 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 | Gateway LWT | `home/OpenMQTTGateway/LWT` | `online` / `offline` | QoS 1 / retain |
 | Gateway version | `home/OpenMQTTGateway/version` | `v1.7.0` | QoS 1 / retain |
 
+服务端 MQTT 实现：
+
+- 客户端：`dev.koft.ktor-mqtt:mqtt-client:1.2.0`（ktor-mqtt 的
+  `linuxArm64` 构建），只支持 `linuxArm64` 服务端目标。
+- 协议：客户端使用 MQTT 5；OpenMQTTGateway/PicoMQTT 仍是 MQTT 3.1.1。
+  EMQX 等 Broker 在同一连接内做协议版本桥接，因此网关固件不需要升级。
+- 订阅：`MQTT_TOPIC_PREFIX/#`，QoS 1。
+- 发布：命令主题，QoS 1，不使用 retain。
+- 重连：ktor-mqtt 不自动重连；`MqttTransport` 负责有界指数退避
+  （1s → 30s，带抖动），会话稳定 30s 后重置退避。
+- 主题与凭据只从环境变量读取，不写入日志或 API 响应。
+
 规则：
 
 - `turn_on` → `codeOn`；`turn_off` → `codeOff`。
@@ -1819,9 +1809,8 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
   学习 = 捕获 + 按键聚类 + 候选确认 + 之后回放同一组
   `value/protocol/length`。服务端不能要求网关“进入学习模式”，除非使用
   自定义固件扩展（v1 不依赖）。
-- 315MHz 单向；命令确认是 best-effort，捕获缺失不判失败。
-- mock 默认不会把服务端 TX 回显到 `315toMQTT`；这是预期行为。
-  仅在测试命令确认路径时可用 `-tx-echo` / `MOCK_TX_ECHO=true` 显式开启。
+- 315MHz 单向；命令没有确认路径，发布成功即 `dispatched` 终态。
+- 网关不会把服务端 TX 回显到 `315toMQTT`；mock 也按此行为实现。
 - mock 的 `POST /mock/transmit` 与 CLI `send` 只模拟 ESP32 发射，不发布 MQTT；
   `POST /mock/press-button` 的 `frames` / `interval_ms` 与 CLI `burst` 用于模拟
   一次物理按键产生的多帧 RX。
@@ -1846,30 +1835,31 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 
 ## 17. 与当前实现的差异与迁移
 
-| 项 | 当前 | 目标 v1 |
+| 项 | 上一版 | v1.2.0 |
 | --- | --- | --- |
-| MQTT | 未接入 | 订阅捕获/LWT/version，发布命令 |
-| 设备来源 | 启动时两条内存数据 | 学习确认动态创建 |
+| MQTT | KMQTT 适配层 | ktor-mqtt（MQTT 5 客户端），保留重连监督 |
+| 持久化 | 进程内状态 | SQLite + Room3，重启不丢设备/命令/会话 |
+| 设备来源 | 启动时两条内存数据 | 学习确认动态创建并持久化 |
 | 控制 | `POST /api/devices/{id}/toggle` | `POST /api/v1/devices/{id}/commands` |
 | 设备状态 | `on: Boolean` | `state` + `stateEvidence` |
 | 最近动作 | 中文 `lastAction: String` | `DeviceAction { type, atEpochMs, commandId }` |
 | 设备移除 | 无 | `DELETE /devices/{id}` + tombstone + 码释放 |
-| 学习 | 无 | 网关接收器常开上报 + 按键聚类 + 候选确认状态机 + 服务端入库 |
+| 学习 | 无 | 网关接收器常开上报 + 按键聚类 + 候选确认状态机 + SQLite |
 | 设备列表 | 裸数组 | `{ devices, serverTimeEpochMs }` |
-| 事件 | 无 | SSE + 轮询降级 |
+| 事件 | SSE + 轮询降级 | 仅轮询（SSE 已移除） |
 | 错误 | `{error,message}` | `{error:{code,message,requestId,details}}` |
 | 共享模型 | 服务端/客户端各一份 | 独立 `contract` 模块 |
+| 服务端结构 | `ControlPlane` 单对象 | 组合根 + 领域服务 + 仓储 + Room3 DAO |
 
-实施顺序（下一阶段，不在本次范围）：
+当前实现顺序（已完成）：
 
 1. `contract` 模块 + 状态枚举 + golden fixtures。
-2. 服务端领域模型：设备注册表、码归属索引、命令状态机、学习管理器、事件总线。
-3. MQTT 接入：LWT、version、315toMQTT 捕获、命令发布。
-4. 服务端 v1 路由：健康、设备、命令、学习、删除、SSE。
-5. 旧 `/api` 路由映射保留一个发布周期。
-6. 客户端接入 SSE，新增学习页/移除交互，改控制为显式命令。
-7. 联调 mock：`rand` 学习、`on/off` 控制、`kill` 网关离线。
-8. 删除旧路由/DTO。
+2. 服务端领域拆分：`DeviceService`、`CommandService`、`LearningService`、
+   `GatewayIngest`、`GatewayStatusStore`。
+3. SQLite/Room3：entity、DAO、数据库工厂、仓储与映射。
+4. MQTT：ktor-mqtt 传输、LWT/version/捕获摄入、命令单向下发。
+5. 服务端 v1 路由：健康、设备、命令、学习、删除；无 SSE。
+6. 客户端改为轮询；控制/学习/移除交互保持 v1 语义。
 
 ---
 
@@ -1882,8 +1872,8 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - [ ] 正常 turn_on：202、MQTT payload 使用 `codeOn`、设备 revision+1、
       `stateEvidence=commanded`。
 - [ ] 同一 `Idempotency-Key` 重试：只发布一次，返回同一 commandId。
-- [ ] 网关回显匹配码：命令变 `confirmed`，设备 `stateEvidence=reported`。
-- [ ] 未收到回显：命令保持 `dispatched`，不误判失败。
+- [ ] 发布成功：命令为 `dispatched` 终态，不等待也不推断执行结果。
+- [ ] 网关抓码不会改变已有命令状态。
 
 ### 18.2 学习
 
@@ -1892,7 +1882,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - [ ] 接收器 `unknown` 时允许开始，但 health/UI 提示尚未观察到 RF 信号。
 - [ ] 已有活动会话时再次开始返回 409 learning_busy。
 - [ ] 同一码被独立按 3 次 → 进入 `candidate_on_ready`，`hitCount=3`；
-      第 1、2 次时仍为 `collecting_on`，SSE 分别推送 `1/3`、`2/3`。
+      第 1、2 次时仍为 `collecting_on`，轮询分别返回 `1/3`、`2/3`。
 - [ ] 一次按键产生 5 帧、帧间隔均 ≤400ms → `frameCount=5`、`hitCount=1`，
       不会误判为 3 次按键。
 - [ ] 两次按键间隔 <600ms → 合并为同一次按键，不增加 `hitCount`。
@@ -1926,14 +1916,15 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - [ ] 删除后列表不含该设备；GET 返回 410；控制返回 410。
 - [ ] 码释放后，同一码可被新学习会话重新绑定。
 - [ ] 未发布命令被 cancelled；已发布命令保持 dispatched。
-- [ ] 事件 device.removed 被所有在线客户端收到。
+- [ ] 其他客户端在下次 `GET /devices` 时不再看到该设备。
 
-### 18.4 事件
+### 18.4 轮询与持久化
 
-- [ ] SSE 断线重连带 Last-Event-ID 能补齐缓冲内事件。
-- [ ] 缓冲不足时收到 stream.reset，客户端重新拉快照。
-- [ ] 旧 revision 事件被客户端忽略。
-- [ ] 学习期间无 SSE 时 1s 轮询能完成完整流程。
+- [ ] 学习期间 1s 轮询能完成完整流程。
+- [ ] 轮询返回的旧 revision 被客户端忽略。
+- [ ] 服务端重启后，设备、命令、学习终态仍可读取。
+- [ ] 服务端重启后设备 `online=false`，直到网关重新上报 LWT/version。
+- [ ] MQTT 断开期间命令发布返回 503，进程不退出；重连后恢复。
 
 ---
 
@@ -1948,8 +1939,8 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 | 3 | 删除是否需要软删除/回收站？ | v1 tombstone + 24h，不提供恢复 |
 | 4 | 是否需要禁用设备（不删除但不可控制）？ | v2 再加 `disabled` 生命周期 |
 | 5 | 多网关/多主题前缀如何隔离学习会话？ | v1 单网关；v2 按 gatewayId 分会话 |
-| 6 | 事件流用 SSE 还是 WebSocket？ | v1 SSE；如需双向再评估 |
-| 7 | 学习捕获是否需要持久化？ | v1 内存；重启丢弃，已确认设备也需持久化后再上生产 |
+| 6 | 事件流用 SSE 还是 WebSocket？ | v1.2.0 不提供事件流；客户端按场景轮询，如需双向再评估 |
+| 7 | 学习捕获是否需要持久化？ | 候选码持久化到 SQLite；原始帧不持久化，只保留聚类后的候选与命中计数 |
 | 8 | 命令是否需要离线队列？ | v1 不排队，网关离线直接拒绝 |
 | 9 | 删除/学习是否需要审批？ | 生产环境至少要求认证；高风险操作可加二次确认 |
 | 10 | 生产固件是否提供接收器状态主题？ | 需要确认；若不提供，v1 只能用 `unknown/receiving` 推断，不能保证“接收器已就绪” |

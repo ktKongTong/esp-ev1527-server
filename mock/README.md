@@ -4,7 +4,7 @@
 让后端、Compose/前端、自动化测试都可以按最终 MQTT 契约联调。
 
 - 固定的 ClientID、LWT、版本、命令订阅、抓码上报主题
-- 双向射频仿真：RX 支持单帧/多帧按键，TX 支持模拟 ESP32 发射与可选回显
+- 双向射频仿真：RX 支持单帧/多帧按键，TX 模拟 ESP32 发射且不回显
 - 控制台 CLI：`on 1` / `off 1` / `rand` / `press` / `burst` / `send` / `kill` / `boot`
 - 轻量 HTTP 控制接口：`POST /mock/press-button`（RX）、`POST /mock/transmit`（TX）
 - `kill` 不发送 MQTT `DISCONNECT`，直接切断 TCP，真实触发 Broker 的遗嘱消息
@@ -29,9 +29,7 @@
 - 默认 Broker：`tcp://localhost:1883`
 - MQTT 协议：3.1.1（paho 默认，支持 3.1 回退）
 - 启动顺序：连接 → 订阅命令主题 → 发布 retained `version` → 发布 retained `online`
-- 收到发射指令时只打印控制台日志，**默认不会**把该指令回显到 `315toMQTT`（避免业务端出现回环/重复状态）
-- 需要联调服务端“命令 2 秒内收到同码捕获 → confirmed”路径时，可显式开启
-  `-tx-echo` / `MOCK_TX_ECHO=true`；该选项只用于测试，默认关闭
+- 收到发射指令时只打印控制台日志，**不会**把该指令回显到 `315toMQTT`（符合真实网关行为）
 - 只有 `on 1` / `off 1` / `rand` / `press` / `burst` / HTTP 按键才会产生
   `315toMQTT` 抓码事件；`send` 只模拟 ESP32 发射
 
@@ -115,7 +113,6 @@ go build -trimpath -o omg315-mock .
 | `-topic-prefix` | `OMG_TOPIC_PREFIX` | `home/OpenMQTTGateway` | 并行测试时可加前缀 |
 | `-connect-timeout` | — | `5s` | 单次连接超时 |
 | `-keepalive` | — | `30s` | MQTT KeepAlive |
-| `-tx-echo` | `MOCK_TX_ECHO` | `false` | 收到 MQTT 发射指令后模拟接收器回显一次捕获；仅用于测试命令确认路径 |
 
 示例：
 
@@ -260,7 +257,7 @@ curl -X POST http://localhost:8099/mock/transmit \
 
 - `protocol` / `length` 省略时默认 `1` / `24`；`repeat` 省略时默认 `5`
 - `repeat` 范围 `1..50`
-- 发射**不会**自动发布 `315toMQTT`；需要回显时用 MQTT 路径并开启 `-tx-echo`
+- 发射**不会**发布 `315toMQTT`；命令只有 MQTT 发布结果，没有 RF 确认
 - 网关断电时返回 `503`
 
 ### 扩展接口
@@ -293,10 +290,12 @@ curl -X POST http://localhost:8099/mock/boot
    ```
 3. 在 Compose 界面点“打开增氧机” → 后端下发指令 → 上述日志出现。
 4. 在 Mock 终端输入 `on 1`（或调用 `POST /mock/press-button`）→ Mock 发布
-   `home/OpenMQTTGateway/315toMQTT` → 前端订阅到抓码后卡片变绿。
+   `home/OpenMQTTGateway/315toMQTT`；服务端把抓码计入学习会话，
+   不改变设备或命令状态。
 
 > 注意：`MQTTto315` 只表示“网关收到发射请求”，Mock 不会自动把它伪装成一次物理按键。
-> 前端状态请由后端在命令成功后的业务状态驱动，或等待后续 `315toMQTT` 抓码事件。
+> 命令发布成功即 `dispatched`（终态），前端以轮询到的设备快照为准；
+> `315toMQTT` 抓码只用于学习，不用于确认命令执行结果。
 
 ### 验证 MQTT 报文
 

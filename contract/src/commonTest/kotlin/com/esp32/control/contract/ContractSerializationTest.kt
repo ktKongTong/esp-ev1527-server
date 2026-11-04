@@ -4,12 +4,11 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 /**
  * Wire-shape tests for contract v1. These strings mirror the JSON documented
- * in docs/contract-v1.md and the payloads the server emits over HTTP and SSE.
+ * in docs/api-contract-v1.md.
  */
 class ContractSerializationTest {
 
@@ -50,29 +49,6 @@ class ContractSerializationTest {
 
         assertEquals(CommandAction.TURN_ON, on.action)
         assertEquals(CommandAction.TURN_OFF, off.action)
-    }
-
-    @Test
-    fun eventsUseTypeDiscriminatorOnEncodeAndDecode() {
-        val wire = """
-            {
-              "type": "device.removed",
-              "eventId": "evt_1",
-              "atEpochMs": 1730000000123,
-              "deviceId": "dev_1",
-              "removedAtEpochMs": 1730000000123,
-              "revision": 4
-            }
-        """.trimIndent()
-
-        val event = ContractJson.decodeFromString<ServerEvent>(wire)
-
-        assertIs<DeviceRemovedEvent>(event)
-        assertEquals("device.removed", event.type)
-        assertEquals("dev_1", event.deviceId)
-
-        val encoded = ContractJson.encodeToString(ServerEvent.serializer(), event)
-        assertTrue(encoded.contains("\"type\":\"device.removed\""), encoded)
     }
 
     @Test

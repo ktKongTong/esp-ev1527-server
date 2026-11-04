@@ -108,11 +108,6 @@ func printBanner(cfg Config, log *Logger) {
 	log.Printf(" 版本信息    : %s -> \"%s\" (retained)", topics.Version, gatewayVersion)
 	log.Printf(" 命令订阅    : %s", topics.Command)
 	log.Printf(" 抓码上报    : %s", topics.RX)
-	if cfg.TXEcho {
-		log.Printf(" TX 回显     : 开启（仅测试；发射后会模拟一次 RX 捕获）")
-	} else {
-		log.Printf(" TX 回显     : 关闭（符合真实网关不回显 TX 的行为）")
-	}
 	if cfg.HTTPAddr != "" {
 		log.Printf(" HTTP 控制   : http://%s/mock/press-button", displayHTTPAddr(cfg.HTTPAddr))
 	} else {

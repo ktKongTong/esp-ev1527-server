@@ -3,7 +3,6 @@ package com.esp32.control.gui.api
 import com.esp32.control.contract.ApiErrorEnvelope
 import com.esp32.control.contract.CommandAccepted
 import com.esp32.control.contract.CommandAction
-import com.esp32.control.contract.CommandRecord
 import com.esp32.control.contract.CommandRequest
 import com.esp32.control.contract.ConfirmLearningRequest
 import com.esp32.control.contract.ContractJson
@@ -76,9 +75,6 @@ class Esp32Api(
         contentType(ContentType.Application.Json)
         setBody(CommandRequest(action))
     }.bodyOrThrow()
-
-    suspend fun command(commandId: String): CommandRecord =
-        client.get("$root/commands/$commandId").bodyOrThrow()
 
     suspend fun removeDevice(deviceId: String) {
         client.delete("$root/devices/$deviceId").ensureSuccess()

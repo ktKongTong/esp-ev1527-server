@@ -1,10 +1,22 @@
 package com.esp32.control.server
 
+import com.esp32.control.contract.API_VERSION
 import com.esp32.control.contract.ApiErrorBody
 import com.esp32.control.contract.ApiErrorEnvelope
+import com.esp32.control.contract.CONTRACT_VERSION
 import com.esp32.control.contract.ContractJson
-import com.esp32.control.contract.ServerEvent
-import com.esp32.control.contract.type
+import com.esp32.control.contract.HealthResponse
+import com.esp32.control.contract.HealthStatus
+import com.esp32.control.server.data.CommandRepository
+import com.esp32.control.server.data.DeviceRepository
+import com.esp32.control.server.db.createDatabase
+import com.esp32.control.server.domain.CommandService
+import com.esp32.control.server.domain.DeviceService
+import com.esp32.control.server.domain.LearningService
+import com.esp32.control.server.mqtt.GatewayIngest
+import com.esp32.control.server.mqtt.GatewayStatusStore
+import com.esp32.control.server.mqtt.MqttRfTransmitter
+import com.esp32.control.server.mqtt.MqttTransport
 import com.esp32.control.server.routes.deviceRoute
 import com.esp32.control.server.routes.learningRoute
 import io.ktor.http.HttpHeaders
@@ -23,13 +35,8 @@ import io.ktor.server.plugins.UnsupportedMediaTypeException
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.plugins.statuspages.StatusPages
-import io.ktor.server.sse.SSE
-import io.ktor.server.sse.heartbeat
-import io.ktor.server.sse.sse
 import io.ktor.serialization.kotlinx.json.json
-import io.ktor.sse.ServerSentEvent
 import io.ktor.server.request.contentType
-import io.ktor.server.request.uri
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
@@ -44,208 +51,119 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.serialization.encodeToString
-import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.runBlocking
+import kotlin.system.exitProcess
+import kotlin.time.Duration.Companion.milliseconds
+import kotlinx.coroutines.ensureActive
 
-private val RequestIdKey = AttributeKey<String>("esp32.requestId")
-
-private val RequestContextPlugin = createApplicationPlugin("RequestContext") {
-    onCall { call ->
-        val incoming = call.request.headers["X-Request-Id"]
-        val requestId = if (incoming != null && incoming.length in 1..128) {
-            incoming
-        } else {
-            newId("req")
-        }
-        call.attributes.put(RequestIdKey, requestId)
-        call.response.header("X-Request-Id", requestId)
-        if (!call.request.uri.startsWith("/api/v1/events")) {
-            call.response.header(HttpHeaders.CacheControl, "no-store")
-        }
-    }
-}
 
 fun main() {
-    val config = ServerConfig.fromEnvironment()
-    val hub = SseHub()
-    val control = ControlPlane(config, hub)
+    val config = runCatching { ServerConfig.fromEnvironment() }.getOrElse { cause ->
+        println("Configuration error: ${cause.message}")
+        exitProcess(1)
+    }
+    val startedAtEpochMs = nowEpochMs()
+    val database = createDatabase(config.databasePath)
+    val deviceRepository = DeviceRepository(database)
+    val commandRepository = CommandRepository(database)
+    val gateway = GatewayStatusStore(config.gatewayClientId)
+
+    // MQTT callbacks need the ingest service, while the services need the MQTT
+    // transmitter. The holder closes that wiring cycle without a god object.
+    var ingest: GatewayIngest? = null
+
+    val mqtt = MqttTransport(
+        config = config.mqtt,
+        topicFilter = config.subscribedTopicFilter,
+        onMessage = { message -> ingest?.onMessage(message.topic, message.payload) },
+        onDisconnected = { ingest?.onDisconnected() },
+    )
+    val transmitter = MqttRfTransmitter(mqtt, config.commandTopic)
+
+    val commandService = CommandService(
+        db = database,
+        devices = deviceRepository,
+        commands = commandRepository,
+        gateway = gateway,
+        transmitter = transmitter,
+    )
+    val deviceService = DeviceService(
+        db = database,
+        devices = deviceRepository,
+    )
+    val learningService = LearningService(
+        db = database,
+        devices = deviceRepository,
+        gateway = gateway,
+        transmitter = transmitter,
+    )
+    val gatewayIngest = GatewayIngest(
+        config = config,
+        gateway = gateway,
+        devices = deviceRepository,
+        learning = learningService,
+    )
+    ingest = gatewayIngest
+
+    // Persisted devices are not proof of a live gateway. Start offline and let
+    // the retained LWT/version message bring them back online.
+    runBlocking { deviceRepository.setOnline(false) }
+
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-
-    val mqtt = config.mqtt?.let { mqttConfig ->
-        MqttClient(
-            config = mqttConfig,
-            onMessage = control::onMqttMessage,
-            onConnected = control::onMqttConnected,
-            onDisconnected = control::onMqttDisconnected,
-        )
-    }
-    mqtt?.let {
-        control.attachTransport { topic, payload -> it.publish(topic, payload) }
-        it.start()
-    }
-
+    // 单独一个协程做 mqtt client
+    mqtt.start()
+    // 定时任务
     scope.launch {
         while (isActive) {
-            delay(500)
-            runCatching { control.tick() }
+            delay(500.milliseconds)
+            runCatching { learningService.tick() }.onFailure {
+                if (it is CancellationException) {
+                    ensureActive()
+                }
+            }
+            runCatching { commandService.purge(nowEpochMs()) }.onFailure {
+                if (it is CancellationException) {
+                    ensureActive()
+                }
+            }
+            runCatching { deviceService.purge(nowEpochMs()) }.onFailure {
+                if (it is CancellationException) {
+                    ensureActive()
+                }
+            }
         }
     }
 
     embeddedServer(CIO, host = config.host, port = config.port) {
-        module(control, hub, config)
-    }.start(wait = true)
-}
+        installModules()
 
-fun Application.module(control: ControlPlane, hub: SseHub, config: ServerConfig) {
-    install(RequestContextPlugin)
-    install(ContentNegotiation) {
-        json(ContractJson)
-    }
-    install(CORS) {
-        anyHost()
-        allowMethod(HttpMethod.Get)
-        allowMethod(HttpMethod.Post)
-        allowMethod(HttpMethod.Delete)
-        allowMethod(HttpMethod.Options)
-        allowHeader(HttpHeaders.Accept)
-        allowHeader(HttpHeaders.ContentType)
-        allowHeader("Idempotency-Key")
-        allowHeader("X-Request-Id")
-        allowHeader("Last-Event-ID")
-        exposeHeader("X-Request-Id")
-        exposeHeader("Idempotent-Replayed")
-    }
-    install(SSE)
-    install(StatusPages) {
-        exception<ApiException> { call, cause ->
-            call.respondApiError(cause.status, cause.code, cause.message, cause.details)
-        }
-        exception<ContentTransformationException> { call, _ ->
-            call.respondApiError(
-                HttpStatusCode.BadRequest,
-                "malformed_json",
-                "Request body is not valid JSON",
-            )
-        }
-        exception<UnsupportedMediaTypeException> { call, _ ->
-            call.respondApiError(
-                HttpStatusCode.UnsupportedMediaType,
-                "unsupported_media_type",
-                "Content-Type must be application/json",
-            )
-        }
-        exception<BadRequestException> { call, _ ->
-            // Application-level 400s are thrown as ApiException. A raw
-            // BadRequestException here comes from body deserialization.
-            call.respondApiError(
-                HttpStatusCode.BadRequest,
-                "malformed_json",
-                "Request body is not valid JSON",
-            )
-        }
-        exception<Throwable> { call, cause ->
-            if (cause is CancellationException) throw cause
-            val message = cause.message.orEmpty()
-            if (message.contains("Cannot transform this request's content", ignoreCase = true)) {
-                val contentType = call.request.contentType()
-                if (contentType.contentType != "application" || contentType.contentSubtype != "json") {
-                    call.respondApiError(
-                        HttpStatusCode.UnsupportedMediaType,
-                        "unsupported_media_type",
-                        "Content-Type must be application/json",
-                    )
-                } else {
-                    call.respondApiError(
-                        HttpStatusCode.BadRequest,
-                        "malformed_json",
-                        "Request body is not valid JSON",
-                    )
-                }
-                return@exception
+        routing {
+            get("/") {
+                call.respondText(
+                    "ESP32 control server ${SERVER_VERSION} (contract $CONTRACT_VERSION)\n" +
+                            "API base: /api/v1\n",
+                )
             }
-            call.respondApiError(
-                HttpStatusCode.InternalServerError,
-                "internal_error",
-                cause.message ?: "Unexpected server error",
-            )
-        }
-        status(HttpStatusCode.NotFound) { call, _ ->
-            call.respondApiError(HttpStatusCode.NotFound, "route_not_found", "Route not found")
-        }
-        status(HttpStatusCode.MethodNotAllowed) { call, _ ->
-            call.respondApiError(
-                HttpStatusCode.MethodNotAllowed,
-                "method_not_allowed",
-                "Method not allowed",
-            )
-        }
-    }
 
-    routing {
-        get("/") {
-            call.respondText(
-                "ESP32 control server ${SERVER_VERSION} (contract 1.1.0)\n" +
-                    "API base: /api/v1\n" +
-                    "dataSource: ${config.dataSource}\n",
-            )
-        }
-
-        route("/api/v1") {
-            get("/health") {
-                call.respond(control.health())
-            }
-            deviceRoute(control)
-            learningRoute(control)
-
-            sse("/events") {
-                heartbeat { period = 15.seconds }
-                send(ServerSentEvent(retry = 3_000))
-                val lastEventId = call.request.headers["Last-Event-ID"]
-                hub.stream(lastEventId) { event ->
-                    send(
-                        ServerSentEvent(
-                            data = encodeEvent(event),
-                            event = event.type,
-                            id = event.eventId,
+            route("/api/v1") {
+                get("/health") {
+                    val now = nowEpochMs()
+                    call.respond(
+                        HealthResponse(
+                            status = HealthStatus.OK,
+                            service = "esp32-control-server",
+                            apiVersion = API_VERSION,
+                            version = SERVER_VERSION,
+                            runtime = "Kotlin/Native",
+                            uptimeSeconds = (now - startedAtEpochMs).coerceAtLeast(0) / 1000,
+                            serverTimeEpochMs = now,
+                            gateway = gateway.snapshot(),
                         ),
                     )
                 }
+                deviceRoute(deviceService, commandService)
+                learningRoute(learningService)
             }
         }
-    }
+    }.start(wait = true)
 }
-
-private suspend fun ApplicationCall.respondApiError(
-    status: HttpStatusCode,
-    code: String,
-    message: String,
-    details: Map<String, String>? = null,
-) {
-    val requestId = if (attributes.contains(RequestIdKey)) attributes[RequestIdKey] else newId("req")
-    respond(
-        status,
-        ApiErrorEnvelope(
-            ApiErrorBody(
-                code = code,
-                message = message,
-                requestId = requestId,
-                details = details,
-            ),
-        ),
-    )
-}
-
-private fun encodeEvent(event: ServerEvent): String =
-    ContractJson.encodeToString(ServerEvent.serializer(), event)
-
-internal fun invalidDeviceId(): ApiException = ApiException(
-    HttpStatusCode.BadRequest,
-    "invalid_device_id",
-    "Invalid device id",
-)
-
-internal fun learningNotFound(): ApiException = ApiException(
-    HttpStatusCode.NotFound,
-    "learning_session_not_found",
-    "Learning session not found",
-)

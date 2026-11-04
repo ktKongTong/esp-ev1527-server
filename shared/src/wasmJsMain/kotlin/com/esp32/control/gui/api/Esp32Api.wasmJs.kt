@@ -15,6 +15,5 @@ actual fun createPlatformHttpClient(): HttpClient = HttpClient(Js) {
  * reverse proxy for HTTPS production deployments.
  */
 actual fun apiBaseUrl(): String {
-    val host = window.location.hostname.ifBlank { "localhost" }
-    return "http://$host:8080"
+    return window.location.origin
 }

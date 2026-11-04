@@ -2,50 +2,55 @@
 
 Android + Web 共用一套 Compose UI，Kotlin/Native 服务端通过 MQTT 驱动
 OpenMQTTGateway 315MHz 网关，实现**控制开关、学习新设备、移除旧设备**。
-服务端、Android、Web 三端共享 `contract` 模块中的 HTTP/SSE 协议类型，
+服务端、Android、Web 三端共享 `contract` 模块中的 HTTP 协议类型，
 避免各端维护同名模型。
 
-当前仓库已实现契约 v1.1.0；协议与状态机的完整定义见
+当前仓库已实现契约 v1.2.0；协议与状态机的完整定义见
 [`docs/api-contract-v1.md`](docs/api-contract-v1.md)。仓库内的
 [`mock/`](mock/README.md) 是可直接联调的 OpenMQTTGateway v1.7+ 仿真器。
 
 ## 已实现能力
 
 - **控制开关**：显式 `turn_on` / `turn_off` 命令，`Idempotency-Key` 保证重试只发布一次；
-  命令依次经历 `dispatched → confirmed / failed / cancelled`。
+  命令发布成功为 `dispatched`（终态），发布失败为 `failed`，发布前被删除为 `cancelled`。
 - **学习新设备**：客户端发起会话 → 服务端关联 60s 采集窗口 → 消费网关持续上报的
   315MHz 抓码 → 按按键间隔聚类 → 同一码被独立按 3 次生成候选 → 客户端确认开/关键
   → 再学另一个键 → 试发 → 命名保存。没有网关抓码就不会产生设备。
 - **移除设备**：立即拒绝新命令、取消未下发命令、释放开/关码、写入 tombstone；
   重复删除保持幂等。
-- **实时同步**：SSE 推送网关、设备、命令、学习会话变化，支持 `Last-Event-ID`
-  重放；客户端同时保留轮询降级。
+- **持久化**：设备、命令、幂等 key 和 tombstone 保存在 SQLite（Room3 ORM），
+  服务端重启不丢失；学习会话只存在于内存，重启后需重新开始。
+- **状态同步**：客户端按场景轮询快照（学习 1s、设备 30s），
+  以 `revision` 校正本地状态；v1.2.0 不提供 SSE。
 - **完整错误契约**：统一错误信封、请求 ID、`410` tombstone、`409` 状态冲突、
   `422` 码对不合法、`415` 媒体类型错误、`400` 非法 JSON。
 
 ## 架构
 
 ```
-┌──────────┐   HTTP/JSON/SSE   ┌──────────────┐   MQTT 3.1.1   ┌───────────┐  315MHz  ┌────────┐
-│ Android  │ ◄───────────────► │    Server    │ ◄────────────► │  Gateway  │ ◄──────► │ Remote │
-│   Web    │                   │ Kotlin/Native│                │   ESP32   │          │ Button │
-└──────────┘                   └──────────────┘                └───────────┘          └────────┘
+┌──────────┐    HTTP/JSON      ┌──────────────┐  MQTT 5 / 3.1.1 ┌───────────┐  315MHz  ┌────────┐
+│ Android  │ ◄───────────────► │    Server    │ ◄──────────────► │  Gateway  │ ◄──────► │ Remote │
+│   Web    │                   │ Kotlin/Native│                  │   ESP32   │          │ Button │
+└──────────┘                   └──────────────┘                  └───────────┘          └────────┘
       │                               │
       └──────── contract ─────────────┘
 ```
 
+服务端内部：Ktor 路由 → 领域服务（设备/命令/学习）→ 仓储 → Room3 DAO → SQLite；
+MQTT 摄入由 `GatewayIngest` 分发给学习状态机。`Main.kt` 只负责组装。
+
 - 服务端是设备、命令、学习会话状态的唯一权威。
 - 网关负责 MQTT 桥接与 315MHz 收发；服务端订阅主题前缀下的全部消息，
   按 payload 分类处理 LWT、版本与 RF 抓码，不依赖硬编码的抓码子主题。
-- 315MHz 是单向链路：命令 `202` 只代表已发布；只有网关回显匹配的 RF 码，
-  命令才会变成 `confirmed`。
+- 315MHz 是单向链路：MQTT PUBACK 只代表 Broker 接收，命令 `202` 只代表已发布。
+  网关抓码只用于学习，不用于确认命令执行结果。
 
 ## 目录结构
 
 ```
 esp32/
-├── contract/        KMP 共享协议：DTO、SSE 事件、ContractJson、枚举
-├── server/          Ktor 3 + Kotlin/Native（linuxArm64）+ KMQTT 适配层
+├── contract/        KMP 共享协议：DTO、ContractJson、枚举
+├── server/          Ktor 3 + Kotlin/Native（linuxArm64）+ ktor-mqtt + Room3/SQLite
 ├── shared/          Compose Multiplatform UI 与 Ktor 客户端（Android + Wasm）
 ├── androidApp/      Android 应用壳（Material You 动态取色）
 ├── webApp/          Kotlin/Wasm Web 应用与 index.html
@@ -71,8 +76,8 @@ esp32/
 | Gradle | 9.6.1 | Wrapper 已包含 |
 | JDK | 17 | 编译与 Gradle 运行 |
 | Ktor | 3.6.1 | 服务端 CIO；客户端 Android 用 CIO，Web 用 Js/fetch |
-| MQTT | KMQTT 1.0.0 | MIT；MQTT 3.1.1 / QoS 1 / Kotlin-Native `linuxArm64`，适配层负责重连 |
-| SSE | Ktor 3.6.1 `server-sse` | 服务端事件流、心跳与 `Last-Event-ID` 补发 |
+| MQTT | `dev.koft.ktor-mqtt` 1.2.0 | MQTT 5 客户端；适配层负责重连与 QoS 1 |
+| 持久化 | Room3 3.0.3 + SQLite 2.7.1 | `room3-runtime` / KSP；`sqlite-bundled` 驱动，无宿主机依赖 |
 | Kotlin/Wasm | 2.4.21 | 浏览器端使用 WasmGC |
 | EMQX | 5.8.7 | 仅测试栈使用，可替换为任意 MQTT 3.1.1 Broker |
 
@@ -126,11 +131,10 @@ docker run --rm --name esp32-server \
 
 ```bash
 curl -s http://127.0.0.1:8080/api/v1/health | jq
-# dataSource 应为 "mqtt"，gateway.state 应为 "online"
+# gateway.state 应为 "online"
 ```
 
-不传 `MQTT_HOST` 时服务端进入 `in-memory-demo` 模式：接口和 UI 可用，但没有
-网关与 RF 捕获，因此无法完成学习。
+MQTT 是必需配置：未设置 `MQTT_HOST` 时服务端拒绝启动，不提供无网关的降级模式。
 
 ### 3. 启动 Web 端
 
@@ -180,7 +184,8 @@ Web 需在同一台机器，或自行调整
 ```
 
 ```bash
-./scripts/run-server-docker.sh   # 不带 MQTT 的 in-memory-demo 服务端
+MQTT_HOST=emqx MQTT_NETWORK=mock_default ./scripts/run-server-docker.sh
+# 数据库保存在 .data/
 ```
 
 ## 学习新设备
@@ -204,7 +209,7 @@ Web 需在同一台机器，或自行调整
    `{"code":1714740}`。
 5. 接受关码候选后进入 `ready`。可先试发，再填写名称/位置并保存；
    服务端创建设备并登记两个码的全局归属。
-6. 保存成功返回 `201`，SSE 推送 `device.added`、`learning.updated`。
+6. 保存成功返回 `201`，客户端更新设备列表。
 
 采集窗口为每个槽位 60s，候选确认 30s，`ready` 保存窗口 5min，
 会话总时长 10min。超时、网关掉线、码冲突都会以明确的
@@ -231,7 +236,6 @@ Base URL：`/api/v1`。完整定义见
 | `POST` | `.../test` | `202 LearningTestResult` | 试发已确认的码 |
 | `POST` | `.../confirm` | `201 LearningConfirmation` | 命名并保存新设备 |
 | `DELETE` | `/api/v1/learning/sessions/{id}` | `204` | 取消学习 |
-| `GET` | `/api/v1/events` | `200 text/event-stream` | SSE 事件流 |
 
 控制示例：
 
@@ -242,7 +246,7 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/devices/$DEVICE_ID/commands \
   -d '{"action":"turn_on"}'
 ```
 
-同一 `Idempotency-Key` 在 24h 内重试会返回同一 `commandId`，响应头包含
+同一 `Idempotency-Key` 在 10 分钟内重试会返回同一 `commandId`，响应头包含
 `Idempotent-Replayed: true`，且不会再次发布 MQTT。
 
 错误统一为：
@@ -259,28 +263,30 @@ curl -sS -X POST http://127.0.0.1:8080/api/v1/devices/$DEVICE_ID/commands \
 ```
 
 响应头 `X-Request-Id` 会回显客户端提供的值（1–128 字符），否则服务端生成；
-非 SSE 响应带 `Cache-Control: no-store`。
+所有 API 响应带 `Cache-Control: no-store`。
 
-SSE 事件类型：`gateway.updated`、`device.added`、`device.updated`、
-`device.removed`、`command.updated`、`learning.updated`、`stream.reset`。
-断线重连时携带 `Last-Event-ID` 可补发缓冲区内的事件；缓冲不足会收到
-`stream.reset`，客户端应重新拉取快照。
+v1.2.0 不提供事件流。客户端按场景轮询快照：学习 1s、设备列表 30s、
+健康状态 30s；写操作成功后立即刷新。命令发布后状态不再变化，无需轮询。
 
 ## 服务端环境变量
 
-| 变量 | 默认值 | 说明 |
+| 变量 | 默认值 / 要求 | 说明 |
 | --- | --- | --- |
 | `SERVER_HOST` | `0.0.0.0` | HTTP 监听地址 |
 | `SERVER_PORT` | `8080` | HTTP 监听端口 |
-| `MQTT_HOST` | 未设置 | 设置后启用 MQTT 模式；否则为 `in-memory-demo` |
+| `MQTT_HOST` | 必需 | Broker 主机名；未设置时服务端拒绝启动 |
 | `MQTT_PORT` | `1883` | Broker 端口 |
 | `MQTT_USERNAME` | 空 | MQTT 用户名 |
 | `MQTT_PASSWORD` | 空 | MQTT 密码 |
+| `MQTT_CLIENT_ID` | `esp32-control-server-<random>` | 服务端 MQTT ClientID |
 | `MQTT_TOPIC_PREFIX` | `home/OpenMQTTGateway` | 命令、LWT、版本、抓码的公共前缀 |
 | `GATEWAY_CLIENT_ID` | `OpenMQTTGateway_ESP32_315M` | UI/诊断展示用网关 ClientID |
+| `DATABASE_PATH` | `esp32-control.db` | SQLite 文件路径；相对路径基于进程工作目录 |
 
-服务端内部为内存存储：重启会丢失学习中的会话与已创建设备。生产部署需要
-持久化设备/码归属/幂等记录，并增加认证与多网关隔离。
+设备、命令、幂等 key 与 tombstone 持久化在 SQLite（Room3）。网关在线状态
+和学习会话是运行时状态：网关状态由 retained LWT 恢复，学习会话在重启后
+丢失；命令发布后即终态，重启不会重发。生产部署仍需增加认证、多网关隔离
+与备份策略。
 
 ## mock 控制接口
 
@@ -322,28 +328,38 @@ CLI：`on 1`、`off 1`、`rand`、`press <code>`、`burst <code> [frames]`、
 5. **产物体积**：Web 产物约 19 MB（Wasm + Skiko + 字体），首次加载较慢。
    生产部署应启用 gzip/brotli 与长期缓存，字体可做子集化。
 
-## 已验证内容（2026-11-03）
+## 已验证内容（2026-11-03，v1.2.0 迁移）
 
-- `:contract:testAndroidHostTest` 通过，覆盖设备/命令/学习会话/错误信封的
-  JSON 形状与 SSE `type` 判别字段。
+本次迁移后实际执行：
+
+- `:contract:testAndroidHostTest` 通过。
 - `:server:linkDebugExecutableLinuxArm64`、`:androidApp:assembleDebug`、
   `:webApp:wasmJsBrowserDistribution` 构建成功。
-- mock + EMQX + Linux 服务端端到端：
-  - 学习 3 次开码 → 接受 → 3 次关码 → 接受 → `ready` → 试发 → 保存设备；
-  - 控制命令 `202`、幂等重放不重复发布、RF 回显 2s 内确认；
-  - 删除返回 `204`，重复删除 `204`，之后 `GET` 返回 `410`；
-  - 码冲突返回 `409 code_already_registered`；
-  - 零捕获/命中不足/候选超时分别以 `no_signal`、`insufficient_hits`、
-    `candidate_timeout` 过期；
-  - 网关 `kill` 后控制失败为 `gateway_offline`，`boot` 后恢复。
-- 错误映射：非法 JSON → `400 malformed_json`，错误 `Content-Type` →
-  `415 unsupported_media_type`，且 `X-Request-Id` / `Cache-Control` 不重复。
-- 无头 Chrome（SwiftShader）中 Wasm UI 可渲染中文、读取 API、开始学习、
-  显示采集进度与候选码。
-- Broker 未启动或重启 EMQX 时服务端进程不退出，KMQTT 适配层按退避自动
-  重连，Broker 上线后网关状态恢复为 `online`；SSE 的心跳、事件 `id`/`event` 字段、`Last-Event-ID` 补发和未知
-  ID 的 `stream.reset` 均已验证。
-- 复用审计与 MQTT 库取舍见 [`docs/reuse-audit.md`](docs/reuse-audit.md)。
+- Room3 KSP 生成 `AppDatabase` 与 schema；ktor-mqtt 在 `linuxArm64` 完成链接。
+- `mock/` 的 `go test ./...` 通过。
+
+端到端（Docker `linuxArm64` 服务端 + Mosquitto 2.1.2 + `mock/`）：
+
+- MQTT 5 服务端与 MQTT 3.1.1 网关经 Broker 互通；retained LWT/version
+  使网关上线，`kill`/`boot` 正确切换 online/offline。
+- 学习：开码 3 次 → `candidate_on_ready` → accept → 关码 3 次 → accept
+  → `ready` → confirm 成功保存设备。
+- 控制：`202`、命令为 `dispatched`、设备 `stateEvidence=commanded`；
+  同一幂等 key 重放返回 `Idempotent-Replayed: true` 且不重复发布。
+- 持久化：重启服务端后设备仍在；启动时先离线，收到 retained LWT 后恢复在线。
+- 学习会话：完成一轮学习并保存设备后重启服务端，会话 `GET` 返回
+  `404 learning_session_not_found`，设备仍保留。
+- Room 迁移：用 v1 数据库启动后升到 v2，`REPORTED`→`COMMANDED`、
+  `CONFIRMED`→`DISPATCHED`，`confirmedAtEpochMs` 列删除；
+  v2 → v3 删除 `learning_sessions` / `learning_candidates`，`user_version=3`。
+- 删除：首次/重复 `204`，之后 `GET` 返回 `410 device_removed`；
+  删除后的开/关码可被新学习会话重新捕获。
+- Broker 停止时服务端进程存活并报告 `gateway.state=offline`；
+  Broker 恢复后自动重连，网关回到 `online`。
+
+未覆盖：EMQX 特定行为、多网关隔离、新服务端与 Android/Web UI 的联调
+（客户端仅完成编译与契约测试）。复用审计与库取舍见
+[`docs/reuse-audit.md`](docs/reuse-audit.md)。
 
 ## 常见问题
 
@@ -368,9 +384,10 @@ Docker 流程，或安装完整 Xcode 后加 `-PenableMacosServer=true`。
 Compose Multiplatform 被升级到了 1.12.x。保持 1.10.0，或同步升级
 compileSdk 37 与 AGP 9.1+。
 
-**服务端 `dataSource` 一直是 `in-memory-demo`**
-启动容器时没有设置 `MQTT_HOST`。设置后容器必须能解析 Broker 主机名；
-使用本仓库 compose 栈时加入 `--network mock_default` 并设 `MQTT_HOST=emqx`。
+**服务端启动即退出，提示 `MQTT_HOST is required`**
+服务端没有无 MQTT 的降级模式。设置 `MQTT_HOST`，并确保容器能解析 Broker
+主机名；使用本仓库 compose 栈时加入 `--network mock_default` 并设
+`MQTT_HOST=emqx`。
 
 **网关显示 offline**
 检查 mock 容器日志与 EMQX 连接；mock 使用固定 ClientID
@@ -378,7 +395,7 @@ compileSdk 37 与 AGP 9.1+。
 
 **学习一直 0/3**
 315MHz 接收器是学习唯一信号来源。确认 mock `/mock/health` 正常、
-服务端 `dataSource=mqtt`、按键间隔 ≥600ms；同一物理按键的连续帧不会被
+服务端已连接 Broker、按键间隔 ≥600ms；同一物理按键的连续帧不会被
 算作多次按键。
 
 **Web 白屏 / 中文方框**

@@ -64,7 +64,7 @@ import com.esp32.control.contract.LearningState
 import com.esp32.control.contract.ReceiverState
 import com.esp32.control.contract.StateEvidence
 import com.esp32.control.contract.GatewayState
-import com.esp32.control.contract.DataSource
+import com.esp32.control.contract.CONTRACT_VERSION
 import com.esp32.control.gui.api.ClientApiException
 import com.esp32.control.gui.api.Esp32Api
 import com.esp32.control.gui.api.newIdempotencyKey
@@ -142,18 +142,6 @@ fun App() {
                     devices = devices.map { if (it.id == accepted.device.id) accepted.device else it }
                     commandStatuses = commandStatuses + (device.id to accepted.command)
                     error = null
-
-                    // Contract 10.3 polling fallback: watch the optional RF
-                    // confirmation for up to 10 seconds.
-                    for (attempt in 0 until 10) {
-                        delay(500)
-                        val current = api.command(accepted.command.commandId)
-                        commandStatuses = commandStatuses + (device.id to current)
-                        if (current.status == CommandStatus.CONFIRMED) {
-                            devices = api.devices()
-                            break
-                        }
-                    }
                 } catch (t: Throwable) {
                     if (t is CancellationException) throw t
                     error = t.readableMessage()
@@ -648,9 +636,8 @@ private fun ServerPanel(health: HealthResponse?, baseUrl: String) {
             HealthRow("API 地址", "$baseUrl/api/v1", monospace = true)
             HealthRow("运行时", health?.runtime ?: "—")
             HealthRow("版本", health?.version ?: "—")
-            HealthRow("契约", "1.1.0 · apiVersion ${health?.apiVersion ?: "—"}")
+            HealthRow("契约", "$CONTRACT_VERSION · apiVersion ${health?.apiVersion ?: "—"}")
             HealthRow("运行时长", health?.uptimeSeconds?.let(::formatUptime) ?: "—")
-            HealthRow("数据来源", dataSourceLabel(health?.dataSource))
             HealthRow("网关", gatewayLabel(health?.gateway?.state))
             HealthRow("接收器", receiverLabel(health?.gateway?.receiver?.state))
 
@@ -663,11 +650,8 @@ private fun ServerPanel(health: HealthResponse?, baseUrl: String) {
             Spacer(Modifier.height(12.dp))
 
             Text(
-                text = if (health?.dataSource == DataSource.MQTT) {
-                    "已订阅 home/OpenMQTTGateway/#，命令发布到 MQTTto315。客户端当前使用 1 秒轮询作为 SSE 降级路径。"
-                } else {
-                    "未配置 MQTT_HOST；服务端不会伪造网关在线或捕获。请先启动 MQTT Broker 与 mock/。"
-                },
+                text = "已订阅 home/OpenMQTTGateway/#，命令发布到 MQTTto315。" +
+                    "客户端使用 1 秒/30 秒轮询刷新状态。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f),
             )
@@ -1577,7 +1561,7 @@ private fun FooterPanel(apiBaseUrl: String) {
         )
         Spacer(Modifier.height(4.dp))
         Text(
-            text = "事件流端点已实现 SSE；本客户端当前使用 1 秒/30 秒轮询降级，DTO 与 revision 语义相同。",
+            text = "本客户端使用 1 秒/30 秒轮询刷新；状态以服务端快照的 revision 为准。",
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
         )
@@ -1586,7 +1570,6 @@ private fun FooterPanel(apiBaseUrl: String) {
 
 private fun deviceStatusLabel(device: Device): String = when {
     !device.online -> "离线"
-    device.state == DeviceState.ON && device.stateEvidence == StateEvidence.REPORTED -> "运行中"
     device.state == DeviceState.ON && device.stateEvidence == StateEvidence.COMMANDED -> "已开启·已下发"
     device.state == DeviceState.OFF && device.stateEvidence == StateEvidence.COMMANDED -> "已停止·已下发"
     device.state == DeviceState.OFF -> "已停止"
@@ -1600,8 +1583,7 @@ private fun lastActionLabel(device: Device): String = when (device.lastAction?.t
 }
 
 private fun commandStatusLabel(status: CommandStatus): String = when (status) {
-    CommandStatus.DISPATCHED -> "已下发/等待确认"
-    CommandStatus.CONFIRMED -> "已确认"
+    CommandStatus.DISPATCHED -> "已下发"
     CommandStatus.CANCELLED -> "已取消"
     CommandStatus.FAILED -> "下发失败"
 }
@@ -1654,12 +1636,6 @@ private fun receiverLabel(state: ReceiverState?): String = when (state) {
     ReceiverState.UNKNOWN -> "unknown · 尚未观察到 RF"
     ReceiverState.RECEIVING -> "receiving · 已收到捕获"
     ReceiverState.UNAVAILABLE -> "unavailable · 拒绝学习"
-    null -> "—"
-}
-
-private fun dataSourceLabel(source: DataSource?): String = when (source) {
-    DataSource.MQTT -> "mqtt"
-    DataSource.IN_MEMORY_DEMO -> "in-memory-demo"
     null -> "—"
 }
 

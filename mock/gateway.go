@@ -290,16 +290,6 @@ func (g *Gateway) handleTXCommand(_ mqtt.Client, msg mqtt.Message) {
 	frame := cmd.frame()
 	if _, err := g.TransmitCode(frame.Value, frame.Protocol, frame.Length, frame.Repeat, "MQTT"); err != nil {
 		g.log.Printf("[WARN] 模拟 315M 发射失败: %v", err)
-		return
-	}
-
-	// Real OpenMQTTGateway 315 receivers usually do not hear their own
-	// transmission. Keep that default; enable -tx-echo only when an integration
-	// test needs to exercise the server's optional command confirmation path.
-	if g.cfg.TXEcho {
-		if _, err := g.PressBurst(frame.Value, "TX 回显（测试）", 1, 0); err != nil {
-			g.log.Printf("[WARN] TX 回显失败: %v", err)
-		}
 	}
 }
 

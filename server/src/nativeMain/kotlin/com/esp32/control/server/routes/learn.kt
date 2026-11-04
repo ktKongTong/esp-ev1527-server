@@ -4,7 +4,7 @@ import com.esp32.control.contract.ConfirmLearningRequest
 import com.esp32.control.contract.StartLearningRequest
 import com.esp32.control.contract.TestLearningRequest
 import com.esp32.control.server.ApiException
-import com.esp32.control.server.ControlPlane
+import com.esp32.control.server.domain.LearningService
 import com.esp32.control.server.learningNotFound
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -18,7 +18,7 @@ import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 
-fun Route.learningRoute(control: ControlPlane) {
+fun Route.learningRoute(learning: LearningService) {
     post("/learning/sessions") {
         val length = call.request.contentLength()
         val request = if (length == null || length == 0L) {
@@ -26,13 +26,13 @@ fun Route.learningRoute(control: ControlPlane) {
         } else {
             call.receive<StartLearningRequest>()
         }
-        call.respond(HttpStatusCode.Created, control.startLearning(request))
+        call.respond(HttpStatusCode.Created, learning.start(request))
     }
 
     get("/learning/sessions/{sessionId}") {
         val sessionId = call.parameters["sessionId"]
             ?: throw learningNotFound()
-        call.respond(control.getLearning(sessionId))
+        call.respond(learning.getLearning(sessionId))
     }
 
     post("/learning/sessions/{sessionId}/candidates/{candidateId}/accept") {
@@ -43,12 +43,12 @@ fun Route.learningRoute(control: ControlPlane) {
                 "candidate_not_found",
                 "Candidate not found",
             )
-        call.respond(control.acceptCandidate(sessionId, candidateId))
+        call.respond(learning.acceptCandidate(sessionId, candidateId))
     }
 
     post("/learning/sessions/{sessionId}/rescan") {
         val sessionId = call.parameters["sessionId"] ?: throw learningNotFound()
-        call.respond(control.rescan(sessionId))
+        call.respond(learning.rescan(sessionId))
     }
 
     post("/learning/sessions/{sessionId}/test") {
@@ -56,21 +56,21 @@ fun Route.learningRoute(control: ControlPlane) {
         val request = call.receive<TestLearningRequest>()
         call.respond(
             HttpStatusCode.Accepted,
-            control.testLearning(sessionId, request.slot),
+            learning.testLearning(sessionId, request.slot),
         )
     }
 
     post("/learning/sessions/{sessionId}/confirm") {
         val sessionId = call.parameters["sessionId"] ?: throw learningNotFound()
         val request = call.receive<ConfirmLearningRequest>()
-        val confirmation = control.confirmLearning(sessionId, request)
+        val confirmation = learning.confirmLearning(sessionId, request)
         call.response.header(HttpHeaders.Location, "/api/v1/devices/${confirmation.device.id}")
         call.respond(HttpStatusCode.Created, confirmation)
     }
 
     delete("/learning/sessions/{sessionId}") {
         val sessionId = call.parameters["sessionId"] ?: throw learningNotFound()
-        control.cancelLearning(sessionId)
+        learning.cancelLearning(sessionId)
         call.respond(HttpStatusCode.NoContent)
     }
 }

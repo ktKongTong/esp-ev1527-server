@@ -4,7 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /** Semantic version of this shared contract module. */
-const val CONTRACT_VERSION: String = "1.1.0"
+const val CONTRACT_VERSION: String = "1.2.0"
 
 /** HTTP API version carried in [HealthResponse.apiVersion]. */
 const val API_VERSION: String = "1"
@@ -18,7 +18,6 @@ enum class DeviceState {
 
 @Serializable
 enum class StateEvidence {
-    @SerialName("reported") REPORTED,
     @SerialName("commanded") COMMANDED,
     @SerialName("unknown") UNKNOWN,
 }
@@ -103,12 +102,6 @@ enum class HealthStatus {
 }
 
 @Serializable
-enum class DataSource {
-    @SerialName("in-memory-demo") IN_MEMORY_DEMO,
-    @SerialName("mqtt") MQTT,
-}
-
-@Serializable
 data class HealthResponse(
     val status: HealthStatus,
     val service: String,
@@ -117,7 +110,6 @@ data class HealthResponse(
     val runtime: String,
     val uptimeSeconds: Long,
     val serverTimeEpochMs: Long,
-    val dataSource: DataSource,
     val gateway: GatewayStatus,
 )
 
@@ -133,7 +125,6 @@ data class CommandRequest(val action: CommandAction)
 @Serializable
 enum class CommandStatus {
     @SerialName("dispatched") DISPATCHED,
-    @SerialName("confirmed") CONFIRMED,
     @SerialName("failed") FAILED,
     @SerialName("cancelled") CANCELLED,
 }
@@ -146,7 +137,6 @@ data class CommandRecord(
     val status: CommandStatus,
     val requestedAtEpochMs: Long,
     val dispatchedAtEpochMs: Long? = null,
-    val confirmedAtEpochMs: Long? = null,
     val failureReason: String? = null,
 )
 
