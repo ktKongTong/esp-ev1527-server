@@ -4,7 +4,6 @@ import androidx.room3.Dao
 import androidx.room3.Insert
 import androidx.room3.OnConflictStrategy
 import androidx.room3.Query
-import androidx.room3.Update
 
 @Dao
 interface DeviceDao {
@@ -30,14 +29,8 @@ interface DeviceDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(device: DeviceEntity)
 
-    @Update
-    suspend fun update(device: DeviceEntity)
-
     @Query("DELETE FROM devices WHERE id = :id")
     suspend fun delete(id: String)
-
-    @Query("UPDATE devices SET online = :online, revision = revision + 1 WHERE online != :online")
-    suspend fun setOnline(online: Boolean)
 }
 
 @Dao
@@ -53,21 +46,18 @@ interface TombstoneDao {
 }
 
 @Dao
-interface CommandDao {
-    @Query("SELECT * FROM commands WHERE commandId = :commandId")
-    suspend fun find(commandId: String): CommandEntity?
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun upsert(command: CommandEntity)
-}
-
-@Dao
 interface IdempotencyDao {
     @Query("SELECT * FROM idempotency WHERE idempotencyKey = :key")
     suspend fun find(key: String): IdempotencyEntity?
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(entry: IdempotencyEntity)
+
+    @Query("UPDATE idempotency SET dispatchedAtEpochMs = :atEpochMs WHERE idempotencyKey = :key")
+    suspend fun markDispatched(key: String, atEpochMs: Long)
+
+    @Query("DELETE FROM idempotency WHERE idempotencyKey = :key")
+    suspend fun delete(key: String)
 
     @Query("DELETE FROM idempotency WHERE createdAtEpochMs < :cutoffEpochMs")
     suspend fun purge(cutoffEpochMs: Long)

@@ -3,7 +3,6 @@ package com.esp32.control.server.domain
 import androidx.room3.withWriteTransaction
 import com.esp32.control.contract.ConfirmLearningRequest
 import com.esp32.control.contract.Device
-import com.esp32.control.contract.DeviceState
 import com.esp32.control.contract.GatewayState
 import com.esp32.control.contract.LearningCandidate
 import com.esp32.control.contract.LearningConfirmation
@@ -14,7 +13,6 @@ import com.esp32.control.contract.LearningTestResult
 import com.esp32.control.contract.ReceiverState
 import com.esp32.control.contract.RfParameters
 import com.esp32.control.contract.StartLearningRequest
-import com.esp32.control.contract.StateEvidence
 import com.esp32.control.server.ApiException
 import com.esp32.control.server.data.DeviceRepository
 import com.esp32.control.server.db.AppDatabase
@@ -355,10 +353,11 @@ class LearningService(
         )
 
         if (on.value == off.value) throw codePairInvalid("same_code")
-        if (on.protocol != off.protocol) throw codePairInvalid("protocol_mismatch")
-        if (on.length != off.length) throw codePairInvalid("length_mismatch")
-        if (!validCode(on.value, on.length) || !validCode(off.value, off.length)) {
+        if (!Ev1527.isValid(on.value) || !Ev1527.isValid(off.value)) {
             throw codePairInvalid("code_out_of_range")
+        }
+        if (!Ev1527.sameAddress(on.value, off.value)) {
+            throw codePairInvalid("address_mismatch")
         }
 
         val device = db.withWriteTransaction {
@@ -373,19 +372,13 @@ class LearningService(
                 }
             }
 
-            val online = gateway.isOnline()
             val created = Device(
                 id = newId("dev"),
                 name = name,
                 location = location,
-                state = DeviceState.UNKNOWN,
-                stateEvidence = StateEvidence.UNKNOWN,
-                online = online,
                 codeOn = on.value,
                 codeOff = off.value,
                 rf = RfParameters(protocol = on.protocol, length = on.length, repeat = 5),
-                lastAction = null,
-                revision = 1,
                 createdAtEpochMs = now,
             )
             devices.insert(created)
@@ -451,6 +444,8 @@ class LearningService(
             }
             val deadline = session.collectionExpiresAtEpochMs ?: return@withLock
             if (now >= deadline) return@withLock
+            // The gateway gates EV1527 before this point; keep the domain boundary closed too.
+            if (!Ev1527.isValid(capture.value)) return@withLock
 
             val slot = if (state == LearningState.COLLECTING_ON) {
                 LearningSlot.TURN_ON
@@ -459,10 +454,7 @@ class LearningService(
             }
 
             val existing = session.candidates.firstOrNull {
-                it.slot == slot &&
-                    it.protocol == capture.protocol &&
-                    it.length == capture.length &&
-                    it.value == capture.value
+                it.slot == slot && it.value == capture.value
             }
             if (existing == null && session.candidates.size >= MAX_CANDIDATES) {
                 return@withLock
@@ -659,12 +651,6 @@ class LearningService(
 
     private fun invalidRequest(message: String): ApiException =
         ApiException(HttpStatusCode.BadRequest, "invalid_request", message)
-
-    private fun validCode(value: Long, length: Int): Boolean {
-        if (length !in 1..32) return false
-        if (value < 0) return false
-        return value < (1L shl length)
-    }
 
     private fun codePairInvalid(reason: String): ApiException = ApiException(
         HttpStatusCode.UnprocessableEntity,

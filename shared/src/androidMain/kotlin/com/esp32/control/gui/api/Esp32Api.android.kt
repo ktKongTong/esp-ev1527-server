@@ -11,4 +11,4 @@ actual fun createPlatformHttpClient(): HttpClient = HttpClient(CIO) {
  * 10.0.2.2 is the Android emulator alias for the host machine.
  * For a physical device, replace this with your computer's LAN IP.
  */
-actual fun apiBaseUrl(): String = "http://10.0.2.2:8080"
+actual fun apiBaseUrl(): String = "http://100.110.192.73:8080"

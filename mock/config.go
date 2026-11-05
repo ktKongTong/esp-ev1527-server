@@ -47,7 +47,7 @@ func NewTopics(prefix string) Topics {
 	return Topics{
 		LWT:     p + "/LWT",
 		Version: p + "/version",
-		Command: p + "/commands/MQTTto315",
+		Command: p + "/commands/MQTTto433",
 		RX:      p + "/315toMQTT",
 	}
 }

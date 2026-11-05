@@ -10,6 +10,7 @@ plugins {
 android {
     namespace = "com.esp32.control.gui.android"
     compileSdk = libs.versions.android.compile.sdk.get().toInt()
+    compileSdkMinor = libs.versions.android.sdk.minor.get().toInt()
 
     defaultConfig {
         applicationId = "com.esp32.control"

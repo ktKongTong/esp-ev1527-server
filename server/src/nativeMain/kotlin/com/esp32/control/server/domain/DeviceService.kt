@@ -46,7 +46,6 @@ class DeviceService(
             devices.addTombstone(
                 deviceId = deviceId,
                 removedAtEpochMs = nowEpochMs(),
-                revision = device.revision + 1,
             )
             true
         }

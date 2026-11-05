@@ -3,7 +3,7 @@ package com.esp32.control.server.mqtt
 import com.esp32.control.contract.ContractJson
 import com.esp32.control.contract.GatewayState
 import com.esp32.control.server.ServerConfig
-import com.esp32.control.server.data.DeviceRepository
+import com.esp32.control.server.domain.Ev1527
 import com.esp32.control.server.domain.LearningService
 import com.esp32.control.server.nowEpochMs
 import kotlinx.serialization.Serializable
@@ -12,7 +12,6 @@ import kotlinx.serialization.decodeFromString
 class GatewayIngest(
     private val config: ServerConfig,
     private val gateway: GatewayStatusStore,
-    private val devices: DeviceRepository,
     private val learning: LearningService,
 ) {
     private val prefix = config.subscribedTopicFilter.removeSuffix("/#")
@@ -45,7 +44,6 @@ class GatewayIngest(
     private suspend fun setGateway(state: GatewayState, version: String?) {
         if (!gateway.setGateway(state, version)) return
 
-        devices.setOnline(state == GatewayState.ONLINE)
         if (state != GatewayState.ONLINE) {
             learning.onGatewayOffline(nowEpochMs())
         }
@@ -61,21 +59,14 @@ class GatewayIngest(
         val payload = runCatching {
             ContractJson.decodeFromString<GatewayCapturePayload>(text)
         }.getOrNull() ?: return null
-        if (payload.protocol <= 0) return null
-        if (payload.length !in 1..32) return null
-        if (!validCode(payload.value, payload.length)) return null
+        if (!Ev1527.matches(payload.protocol, payload.length)) return null
+        if (!Ev1527.isValid(payload.value)) return null
         return RfCapture(
             value = payload.value,
             protocol = payload.protocol,
             length = payload.length,
             delayMs = payload.delay.coerceAtLeast(0),
         )
-    }
-
-    private fun validCode(value: Long, length: Int): Boolean {
-        if (length !in 1..32) return false
-        if (value < 0) return false
-        return value < (1L shl length)
     }
 
     @Serializable

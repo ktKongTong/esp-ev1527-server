@@ -9,10 +9,9 @@ import androidx.room3.RoomDatabaseConstructor
     entities = [
         DeviceEntity::class,
         DeviceTombstoneEntity::class,
-        CommandEntity::class,
         IdempotencyEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 @ConstructedBy(AppDatabaseConstructor::class)
@@ -20,8 +19,6 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun deviceDao(): DeviceDao
 
     abstract fun tombstoneDao(): TombstoneDao
-
-    abstract fun commandDao(): CommandDao
 
     abstract fun idempotencyDao(): IdempotencyDao
 }

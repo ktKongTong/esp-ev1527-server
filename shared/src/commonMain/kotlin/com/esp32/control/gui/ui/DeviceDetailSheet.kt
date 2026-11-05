@@ -1,0 +1,188 @@
+package com.esp32.control.gui.ui
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SheetValue
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberBottomSheetState
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
+import com.esp32.control.contract.CommandAction
+import com.esp32.control.contract.Device
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun DeviceDetailSheet(
+    device: Device,
+    pending: Boolean,
+    gatewayOnline: Boolean,
+    errorText: String?,
+    onCommand: (CommandAction) -> Unit,
+    onRemove: () -> Unit,
+    onDismissError: () -> Unit,
+    onClose: () -> Unit,
+) {
+    val sheetState = rememberBottomSheetState(
+        initialValue = SheetValue.Hidden,
+        enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
+    )
+    val enabled = gatewayOnline && !pending
+
+    ModalBottomSheet(
+        onDismissRequest = onClose,
+        sheetState = sheetState,
+        sheetMaxWidth = 720.dp,
+        shape = AppShapes.Sheet,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        dragHandle = { SheetDragHandle() },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 24.dp, end = 24.dp, bottom = 32.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = device.name,
+                        style = MaterialTheme.typography.titleLarge,
+                    )
+                    Text(
+                        text = device.location,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                FilledTonalIconButton(
+                    onClick = onClose,
+                    shape = CircleShape,
+                    modifier = Modifier
+                        .size(44.dp)
+                        .semantics { contentDescription = "关闭" },
+                ) {
+                    CloseIcon(Modifier.size(18.dp))
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            errorText?.let {
+                ErrorBanner(message = it, onDismiss = onDismissError)
+                Spacer(Modifier.height(16.dp))
+            }
+
+            SectionSurface {
+                CodeRow(label = "开码", code = device.codeOn)
+                CodeRow(label = "关码", code = device.codeOff)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "协议 ${device.rf.protocol} · ${device.rf.length} bit · repeat ${device.rf.repeat}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { onCommand(CommandAction.TURN_ON) },
+                    enabled = enabled,
+                    shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 12.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                ) {
+                    Text("开", style = MaterialTheme.typography.titleSmall)
+                }
+                FilledTonalButton(
+                    onClick = { onCommand(CommandAction.TURN_OFF) },
+                    enabled = enabled,
+                    shape = CircleShape,
+                    contentPadding = PaddingValues(horizontal = 12.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(52.dp),
+                ) {
+                    Text("关", style = MaterialTheme.typography.titleSmall)
+                }
+            }
+
+            val statusText = when {
+                pending -> "正在发送…"
+                !gatewayOnline -> "网关离线，无法发送"
+                else -> null
+            }
+            if (statusText != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = statusText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            TextButton(
+                onClick = onRemove,
+                enabled = !pending,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                DeleteIcon(Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("移除遥控器")
+            }
+        }
+    }
+}
+
+@Composable
+private fun CodeRow(label: String, code: Long) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(64.dp),
+        )
+        Text(
+            text = code.toString(),
+            style = MaterialTheme.typography.titleMedium,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}

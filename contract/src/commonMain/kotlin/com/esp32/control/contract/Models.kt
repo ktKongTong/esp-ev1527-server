@@ -4,29 +4,10 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /** Semantic version of this shared contract module. */
-const val CONTRACT_VERSION: String = "1.2.0"
+const val CONTRACT_VERSION: String = "2.0.0"
 
 /** HTTP API version carried in [HealthResponse.apiVersion]. */
 const val API_VERSION: String = "1"
-
-@Serializable
-enum class DeviceState {
-    @SerialName("on") ON,
-    @SerialName("off") OFF,
-    @SerialName("unknown") UNKNOWN,
-}
-
-@Serializable
-enum class StateEvidence {
-    @SerialName("commanded") COMMANDED,
-    @SerialName("unknown") UNKNOWN,
-}
-
-@Serializable
-enum class ActionType {
-    @SerialName("turned_on") TURNED_ON,
-    @SerialName("turned_off") TURNED_OFF,
-}
 
 @Serializable
 data class RfParameters(
@@ -35,26 +16,19 @@ data class RfParameters(
     val repeat: Int = 5,
 )
 
-@Serializable
-data class DeviceAction(
-    val type: ActionType,
-    val atEpochMs: Long,
-    val commandId: String? = null,
-)
-
+/**
+ * A paired 315MHz remote. The RF link has no acknowledgement, so the server
+ * cannot know whether the actuator is on or off; it only stores the two codes
+ * that the remote sends.
+ */
 @Serializable
 data class Device(
     val id: String,
     val name: String,
     val location: String,
-    val state: DeviceState,
-    val stateEvidence: StateEvidence,
-    val online: Boolean,
     val codeOn: Long,
     val codeOff: Long,
     val rf: RfParameters,
-    val lastAction: DeviceAction? = null,
-    val revision: Long,
     val createdAtEpochMs: Long,
 )
 
@@ -122,28 +96,12 @@ enum class CommandAction {
 @Serializable
 data class CommandRequest(val action: CommandAction)
 
+/** Result of a fire-and-forget command. Once published, nothing confirms it. */
 @Serializable
-enum class CommandStatus {
-    @SerialName("dispatched") DISPATCHED,
-    @SerialName("failed") FAILED,
-    @SerialName("cancelled") CANCELLED,
-}
-
-@Serializable
-data class CommandRecord(
-    val commandId: String,
+data class CommandDispatched(
     val deviceId: String,
     val action: CommandAction,
-    val status: CommandStatus,
-    val requestedAtEpochMs: Long,
-    val dispatchedAtEpochMs: Long? = null,
-    val failureReason: String? = null,
-)
-
-@Serializable
-data class CommandAccepted(
-    val command: CommandRecord,
-    val device: Device,
+    val dispatchedAtEpochMs: Long,
 )
 
 @Serializable

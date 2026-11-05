@@ -14,7 +14,13 @@ kotlin {
     // com.android.library + androidTarget().
     android {
         namespace = "com.esp32.control.gui.shared"
-        compileSdk = libs.versions.android.compile.sdk.get().toInt()
+        // Compose 1.13 requires Android API 37.1+; the KMP Android plugin
+        // expresses the minor level through the compileSdk spec.
+        compileSdk {
+            version = release(libs.versions.android.compile.sdk.get().toInt()) {
+                minorApiLevel = libs.versions.android.sdk.minor.get().toInt()
+            }
+        }
         minSdk = libs.versions.android.min.sdk.get().toInt()
 
         compilerOptions {
@@ -43,6 +49,8 @@ kotlin {
 
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
+            // DataStore Preferences is KMP (Android, JVM, native, wasmJs).
+            implementation(libs.androidx.datastore.preferences.core)
             implementation(libs.ktor.client.core)
             implementation(libs.ktor.client.content.negotiation)
             implementation(libs.ktor.serialization.kotlinx.json)

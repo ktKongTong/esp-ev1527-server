@@ -38,17 +38,7 @@ fun Route.deviceRoute(devices: DeviceService, commands: CommandService) {
         if (result.replayed) {
             call.response.header("Idempotent-Replayed", "true")
         }
-        call.respond(HttpStatusCode.Accepted, result.accepted)
-    }
-
-    get("/commands/{commandId}") {
-        val commandId = call.parameters["commandId"]
-            ?: throw ApiException(
-                HttpStatusCode.NotFound,
-                "command_not_found",
-                "Command not found",
-            )
-        call.respond(commands.get(commandId))
+        call.respond(HttpStatusCode.Accepted, result.dispatched)
     }
 
     delete("/devices/{deviceId}") {

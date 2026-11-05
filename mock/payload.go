@@ -31,7 +31,7 @@ type RFCode struct {
 }
 
 // TXFrame is one simulated 315MHz transmission burst. Its field order matches
-// the command payload accepted on <prefix>/commands/MQTTto315.
+// the command payload accepted on <prefix>/commands/MQTTto433.
 type TXFrame struct {
 	Value    uint64 `json:"value"`
 	Protocol int    `json:"protocol"`
@@ -39,7 +39,7 @@ type TXFrame struct {
 	Repeat   int    `json:"repeat"`
 }
 
-// txCommand is the payload received on <prefix>/commands/MQTTto315. Pointers
+// txCommand is the payload received on <prefix>/commands/MQTTto433. Pointers
 // let us distinguish "field omitted" from a legitimate zero value.
 type txCommand struct {
 	Value    *uint64 `json:"value"`

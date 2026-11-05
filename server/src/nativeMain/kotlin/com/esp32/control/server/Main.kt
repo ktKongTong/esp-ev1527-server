@@ -7,8 +7,8 @@ import com.esp32.control.contract.CONTRACT_VERSION
 import com.esp32.control.contract.ContractJson
 import com.esp32.control.contract.HealthResponse
 import com.esp32.control.contract.HealthStatus
-import com.esp32.control.server.data.CommandRepository
 import com.esp32.control.server.data.DeviceRepository
+import com.esp32.control.server.data.IdempotencyRepository
 import com.esp32.control.server.db.createDatabase
 import com.esp32.control.server.domain.CommandService
 import com.esp32.control.server.domain.DeviceService
@@ -51,7 +51,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlin.system.exitProcess
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.ensureActive
@@ -65,7 +64,7 @@ fun main() {
     val startedAtEpochMs = nowEpochMs()
     val database = createDatabase(config.databasePath)
     val deviceRepository = DeviceRepository(database)
-    val commandRepository = CommandRepository(database)
+    val idempotencyRepository = IdempotencyRepository(database)
     val gateway = GatewayStatusStore(config.gatewayClientId)
 
     // MQTT callbacks need the ingest service, while the services need the MQTT
@@ -83,7 +82,7 @@ fun main() {
     val commandService = CommandService(
         db = database,
         devices = deviceRepository,
-        commands = commandRepository,
+        idempotency = idempotencyRepository,
         gateway = gateway,
         transmitter = transmitter,
     )
@@ -100,14 +99,9 @@ fun main() {
     val gatewayIngest = GatewayIngest(
         config = config,
         gateway = gateway,
-        devices = deviceRepository,
         learning = learningService,
     )
     ingest = gatewayIngest
-
-    // Persisted devices are not proof of a live gateway. Start offline and let
-    // the retained LWT/version message bring them back online.
-    runBlocking { deviceRepository.setOnline(false) }
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     // 单独一个协程做 mqtt client

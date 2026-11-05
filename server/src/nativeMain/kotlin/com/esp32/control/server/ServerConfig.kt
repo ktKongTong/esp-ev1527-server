@@ -93,7 +93,7 @@ data class ServerConfig(
                 mqtt = mqtt,
                 databasePath = setting("DATABASE_PATH") ?: "esp32-control.db",
                 gatewayClientId = setting("GATEWAY_CLIENT_ID") ?: "OpenMQTTGateway_ESP32_315M",
-                commandTopic = "$topicPrefix/commands/MQTTto315",
+                commandTopic = "$topicPrefix/commands/MQTTto433",
                 subscribedTopicFilter = "$topicPrefix/#",
             )
         }

@@ -19,7 +19,7 @@
 
 | 方向 | Topic | Payload | QoS / Retain |
 |---|---|---|---|
-| Broker → 网关 | `home/OpenMQTTGateway/commands/MQTTto315` | `{"value":1714739,"protocol":1,"length":24,"repeat":5}` | 订阅 QoS 1 |
+| Broker → 网关 | `home/OpenMQTTGateway/commands/MQTTto433` | `{"value":1714739,"protocol":1,"length":24,"repeat":5}` | 订阅 QoS 1 |
 | 网关注册遗嘱 | `home/OpenMQTTGateway/LWT` | `offline` | QoS 1 / retain |
 | 网关上线上广播 | `home/OpenMQTTGateway/LWT` | `online` | QoS 1 / retain |
 | 网关版本 | `home/OpenMQTTGateway/version` | `v1.7.0` | QoS 1 / retain |
@@ -155,7 +155,7 @@ HTTP_ADDR=:18099
 控制台打印每一条收发的 MQTT 消息：
 
 ```text
-[MQTT RX] topic=home/OpenMQTTGateway/commands/MQTTto315 payload={"value":1714739,"protocol":1,"length":24,"repeat":5}
+[MQTT RX] topic=home/OpenMQTTGateway/commands/MQTTto433 payload={"value":1714739,"protocol":1,"length":24,"repeat":5}
 [315M TX] 模拟天线发射: Value=1714739 (HEX: 0x1A2A33), 重放=5次
 [MQTT TX] topic=home/OpenMQTTGateway/315toMQTT payload={"value":1714739,"protocol":1,"length":24,"delay":330} qos=1 retain=false
 ```
@@ -234,7 +234,7 @@ curl -X POST http://localhost:8099/mock/press-button \
 ### TX（ESP32 发射）
 
 模拟器没有独立的 HTTP 发射入口。TX 只由 MQTT 下发指令触发：
-服务端发布到 `<prefix>/commands/MQTTto315`，网关打印 `[MQTT RX]` 和
+服务端发布到 `<prefix>/commands/MQTTto433`，网关打印 `[MQTT RX]` 和
 `[315M TX]`；发射本身不产生上行 MQTT 消息。
 
 ### 扩展接口
@@ -260,7 +260,7 @@ curl -X POST http://localhost:8099/mock/boot
 ## 5. 前后端联调流程
 
 1. 启动本地 EMQX，再启动本 Mock（见第 2 节）。
-2. 后端发布到 `home/OpenMQTTGateway/commands/MQTTto315` 时，Mock 终端立即打印：
+2. 后端发布到 `home/OpenMQTTGateway/commands/MQTTto433` 时，Mock 终端立即打印：
    ```text
    [315M TX] 模拟天线发射: Value=1714739 (HEX: 0x1A2A33), 重放=5次
    ```
@@ -269,7 +269,7 @@ curl -X POST http://localhost:8099/mock/boot
    `home/OpenMQTTGateway/315toMQTT`；服务端把抓码计入学习会话，
    不改变设备或命令状态。
 
-> 注意：`MQTTto315` 只表示“网关收到发射请求”，Mock 不会自动把它伪装成一次物理按键。
+> 注意：`MQTTto433` 只表示“网关收到发射请求”，Mock 不会自动把它伪装成一次物理按键。
 > 命令发布成功即 `dispatched`（终态），前端以轮询到的设备快照为准；
 > `315toMQTT` 抓码只用于学习，不用于确认命令执行结果。
 
@@ -281,7 +281,7 @@ mosquitto_sub -h localhost -p 1883 -v -t 'home/OpenMQTTGateway/#'
 
 # 下发发射指令
 mosquitto_pub -h localhost -p 1883 \
-  -t 'home/OpenMQTTGateway/commands/MQTTto315' \
+  -t 'home/OpenMQTTGateway/commands/MQTTto433' \
   -m '{"value":1714739,"protocol":1,"length":24,"repeat":5}'
 
 # 读取 retained LWT / version

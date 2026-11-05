@@ -258,7 +258,7 @@ func TestStatusAndHealth(t *testing.T) {
 		ClientID:      defaultClientID,
 		Broker:        defaultMQTTURL,
 		LWT:           "home/OpenMQTTGateway/LWT",
-		CommandTopic:  "home/OpenMQTTGateway/commands/MQTTto315",
+		CommandTopic:  "home/OpenMQTTGateway/commands/MQTTto433",
 		RXTopic:       "home/OpenMQTTGateway/315toMQTT",
 	}}
 	h := newTestHandler(f)

@@ -4,10 +4,11 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Wire-shape tests for contract v1. These strings mirror the JSON documented
+ * Wire-shape tests for the contract. These strings mirror the JSON documented
  * in docs/api-contract-v1.md.
  */
 class ContractSerializationTest {
@@ -19,14 +20,9 @@ class ContractSerializationTest {
               "id": "dev_523F47A849D20ACC2AA890CD",
               "name": "1 号增氧机",
               "location": "1 号塘",
-              "state": "unknown",
-              "stateEvidence": "unknown",
-              "online": true,
               "codeOn": 1714739,
               "codeOff": 1714740,
               "rf": { "protocol": 1, "length": 24, "repeat": 5 },
-              "lastAction": null,
-              "revision": 1,
               "createdAtEpochMs": 1730000000000,
               "futureField": "ignored"
             }
@@ -34,12 +30,29 @@ class ContractSerializationTest {
 
         val device = ContractJson.decodeFromString<Device>(wire)
 
-        assertEquals(DeviceState.UNKNOWN, device.state)
-        assertEquals(StateEvidence.UNKNOWN, device.stateEvidence)
         assertEquals(1714739L, device.codeOn)
         assertEquals(1, device.rf.protocol)
         assertEquals(24, device.rf.length)
         assertEquals(5, device.rf.repeat)
+    }
+
+    @Test
+    fun deviceWireShapeCarriesNoState() {
+        val device = Device(
+            id = "dev_1",
+            name = "1 号增氧机",
+            location = "1 号塘",
+            codeOn = 1714739,
+            codeOff = 1714740,
+            rf = RfParameters(protocol = 1, length = 24, repeat = 5),
+            createdAtEpochMs = 1730000000000,
+        )
+
+        val encoded = ContractJson.encodeToString(device)
+
+        assertFalse(encoded.contains("\"state\""), encoded)
+        assertFalse(encoded.contains("\"online\""), encoded)
+        assertFalse(encoded.contains("\"revision\""), encoded)
     }
 
     @Test

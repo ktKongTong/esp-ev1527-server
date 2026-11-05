@@ -106,9 +106,9 @@ info "校验 retained online / version"
 wait_retained "$PREFIX/LWT" online || fail "retained LWT 不是 online"
 wait_retained "$PREFIX/version" v1.7.0 || fail "retained version 不是 v1.7.0"
 
-info "1) 下发 MQTTto315 发射指令，校验 TX 日志"
+info "1) 下发 MQTTto433 发射指令，校验 TX 日志"
 docker run --rm --network "$NET" --entrypoint mosquitto_pub eclipse-mosquitto:2.0 \
-  -h "$EMQX" -p 1883 -q 1 -t "$PREFIX/commands/MQTTto315" \
+  -h "$EMQX" -p 1883 -q 1 -t "$PREFIX/commands/MQTTto433" \
   -m '{"value":1714739,"protocol":1,"length":24,"repeat":5}'
 wait_log "$MOCK" '[315M TX] 模拟天线发射: Value=1714739 (HEX: 0x1A2A33), 重放=5次' \
   || fail "未看到 [315M TX] 日志"

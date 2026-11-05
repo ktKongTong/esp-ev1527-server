@@ -21,7 +21,6 @@ class DeviceRepository(db: AppDatabase) {
             DeviceTombstone(
                 deviceId = it.deviceId,
                 removedAtEpochMs = it.removedAtEpochMs,
-                revision = it.revision,
             )
         }
 
@@ -32,20 +31,12 @@ class DeviceRepository(db: AppDatabase) {
         devices.insert(device.toEntity())
     }
 
-    suspend fun update(device: Device) {
-        devices.update(device.toEntity())
-    }
-
     suspend fun delete(id: String) {
         devices.delete(id)
     }
 
-    suspend fun addTombstone(deviceId: String, removedAtEpochMs: Long, revision: Long) {
-        tombstones.insert(DeviceTombstoneEntity(deviceId, removedAtEpochMs, revision))
-    }
-
-    suspend fun setOnline(online: Boolean) {
-        devices.setOnline(online)
+    suspend fun addTombstone(deviceId: String, removedAtEpochMs: Long) {
+        tombstones.insert(DeviceTombstoneEntity(deviceId, removedAtEpochMs))
     }
 
     suspend fun purgeTombstones(cutoffEpochMs: Long) {

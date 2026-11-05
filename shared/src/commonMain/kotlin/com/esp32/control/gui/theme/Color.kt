@@ -9,6 +9,9 @@ import androidx.compose.ui.graphics.Color
  * Web has no Android 12+ dynamic-color API, so both web and pre-Android-12
  * devices use this Material 3 seed palette. Android 12+ replaces it with the
  * wallpaper-derived scheme in Theme.android.kt.
+ *
+ * The surface-container ramp is spelled out so the compact layout can build
+ * hierarchy from tonal steps instead of borders and shadows.
  */
 internal val Esp32LightScheme: ColorScheme = lightColorScheme(
     primary = Color(0xFF006C4C),
@@ -27,12 +30,19 @@ internal val Esp32LightScheme: ColorScheme = lightColorScheme(
     onError = Color(0xFFFFFFFF),
     errorContainer = Color(0xFFFFDAD6),
     onErrorContainer = Color(0xFF410002),
-    background = Color(0xFFFBFDF8),
+    background = Color(0xFFF7FAF5),
     onBackground = Color(0xFF191C1A),
-    surface = Color(0xFFFBFDF8),
+    surface = Color(0xFFF7FAF5),
     onSurface = Color(0xFF191C1A),
     surfaceVariant = Color(0xFFDBE5DD),
     onSurfaceVariant = Color(0xFF404943),
+    surfaceDim = Color(0xFFD8DBD5),
+    surfaceBright = Color(0xFFF7FAF5),
+    surfaceContainerLowest = Color(0xFFFFFFFF),
+    surfaceContainerLow = Color(0xFFF1F4EF),
+    surfaceContainer = Color(0xFFEBEFE9),
+    surfaceContainerHigh = Color(0xFFE5E9E3),
+    surfaceContainerHighest = Color(0xFFDFE3DD),
     outline = Color(0xFF707973),
     outlineVariant = Color(0xFFBFC9C2),
     scrim = Color(0xFF000000),
@@ -64,6 +74,13 @@ internal val Esp32DarkScheme: ColorScheme = darkColorScheme(
     onSurface = Color(0xFFDFE4DF),
     surfaceVariant = Color(0xFF404943),
     onSurfaceVariant = Color(0xFFBFC9C2),
+    surfaceDim = Color(0xFF0F1512),
+    surfaceBright = Color(0xFF353B37),
+    surfaceContainerLowest = Color(0xFF0A0F0C),
+    surfaceContainerLow = Color(0xFF171D19),
+    surfaceContainer = Color(0xFF1B211D),
+    surfaceContainerHigh = Color(0xFF252B27),
+    surfaceContainerHighest = Color(0xFF303632),
     outline = Color(0xFF89938C),
     outlineVariant = Color(0xFF404943),
     scrim = Color(0xFF000000),

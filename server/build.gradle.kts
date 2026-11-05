@@ -45,6 +45,10 @@ kotlin {
             implementation(libs.kotlinx.serialization.json)
         }
 
+        commonTest.dependencies {
+            implementation(kotlin("test"))
+        }
+
         nativeMain.dependencies {
             implementation(project(":contract"))
             implementation(libs.ktor.server.core)

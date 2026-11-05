@@ -5,23 +5,25 @@ OpenMQTTGateway 315MHz 网关，实现**控制开关、学习新设备、移除�
 服务端、Android、Web 三端共享 `contract` 模块中的 HTTP 协议类型，
 避免各端维护同名模型。
 
-当前仓库已实现契约 v1.2.0；协议与状态机的完整定义见
+当前仓库已实现契约 v2.0.0；协议与状态机的完整定义见
 [`docs/api-contract-v1.md`](docs/api-contract-v1.md)。仓库内的
 [`mock/`](mock/README.md) 是可直接联调的 OpenMQTTGateway v1.7+ 仿真器。
 
 ## 已实现能力
 
 - **控制开关**：显式 `turn_on` / `turn_off` 命令，`Idempotency-Key` 保证重试只发布一次；
-  命令发布成功为 `dispatched`（终态），发布失败为 `failed`，发布前被删除为 `cancelled`。
+  发布成功即返回 `202 CommandDispatched`，不等待也不推断执行结果。
 - **学习新设备**：客户端发起会话 → 服务端关联 60s 采集窗口 → 消费网关持续上报的
   315MHz 抓码 → 按按键间隔聚类 → 同一码被独立按 3 次生成候选 → 客户端确认开/关键
   → 再学另一个键 → 试发 → 命名保存。没有网关抓码就不会产生设备。
-- **移除设备**：立即拒绝新命令、取消未下发命令、释放开/关码、写入 tombstone；
+- **移除设备**：立即拒绝新命令、阻止未发布的发布动作、释放开/关码、写入 tombstone；
   重复删除保持幂等。
-- **持久化**：设备、命令、幂等 key 和 tombstone 保存在 SQLite（Room3 ORM），
+- **持久化**：设备、幂等 key 和 tombstone 保存在 SQLite（Room3 ORM），
   服务端重启不丢失；学习会话只存在于内存，重启后需重新开始。
-- **状态同步**：客户端按场景轮询快照（学习 1s、设备 30s），
-  以 `revision` 校正本地状态；v1.2.0 不提供 SSE。
+- **无状态设备**：315MHz 链路没有回执，服务端只保存遥控器的开/关码，
+  不推断设备状态，也不保存命令历史。
+- **状态同步**：客户端按场景轮询快照（学习 1s、网关 30s），
+  学习会话以 `revision` 校正；v1 不提供 SSE。
 - **完整错误契约**：统一错误信封、请求 ID、`410` tombstone、`409` 状态冲突、
   `422` 码对不合法、`415` 媒体类型错误、`400` 非法 JSON。
 
@@ -257,8 +259,7 @@ Base URL：`/api/v1`。完整定义见
 | `GET` | `/api/v1/health` | `200 HealthResponse` | 服务、网关、接收器状态 |
 | `GET` | `/api/v1/devices` | `200 DeviceListResponse` | 设备列表 |
 | `GET` | `/api/v1/devices/{id}` | `200 Device` | 单设备；已移除返回 `410` |
-| `POST` | `/api/v1/devices/{id}/commands` | `202 CommandAccepted` | 控制开关 |
-| `GET` | `/api/v1/commands/{id}` | `200 CommandRecord` | 查询命令状态 |
+| `POST` | `/api/v1/devices/{id}/commands` | `202 CommandDispatched` | 发送开/关码 |
 | `DELETE` | `/api/v1/devices/{id}` | `204` | 移除设备（幂等） |
 | `POST` | `/api/v1/learning/sessions` | `201 LearningSession` | 开始学习 |
 | `GET` | `/api/v1/learning/sessions/{id}` | `200 LearningSession` | 轮询学习状态 |
@@ -379,14 +380,17 @@ RX 注入只有 `POST /mock/press-button`。CLI 仅保留 `kill`、`boot`、
   使网关上线，`kill`/`boot` 正确切换 online/offline。
 - 学习：开码 3 次 → `candidate_on_ready` → accept → 关码 3 次 → accept
   → `ready` → confirm 成功保存设备。
-- 控制：`202`、命令为 `dispatched`、设备 `stateEvidence=commanded`；
+- 控制：`202 CommandDispatched`，不写设备状态；
   同一幂等 key 重放返回 `Idempotent-Replayed: true` 且不重复发布。
-- 持久化：重启服务端后设备仍在；启动时先离线，收到 retained LWT 后恢复在线。
+- 持久化：重启服务端后设备仍在；设备没有 online/state 字段，
+  网关状态只由 retained LWT/version 决定。
 - 学习会话：完成一轮学习并保存设备后重启服务端，会话 `GET` 返回
   `404 learning_session_not_found`，设备仍保留。
 - Room 迁移：用 v1 数据库启动后升到 v2，`REPORTED`→`COMMANDED`、
   `CONFIRMED`→`DISPATCHED`，`confirmedAtEpochMs` 列删除；
-  v2 → v3 删除 `learning_sessions` / `learning_candidates`，`user_version=3`。
+  v2 → v3 删除 `learning_sessions` / `learning_candidates`；
+  v3 → v4 删除设备状态/online/lastAction/revision 列与 `commands` 表，
+  `user_version=4`。
 - 删除：首次/重复 `204`，之后 `GET` 返回 `410 device_removed`；
   删除后的开/关码可被新学习会话重新捕获。
 - Broker 停止时服务端进程存活并报告 `gateway.state=offline`；

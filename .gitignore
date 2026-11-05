@@ -59,6 +59,7 @@ captures/
 *.db
 *.db-shm
 *.db-wal
+*.db.lck
 *.log
 *.hprof
 hs_err_pid*
@@ -66,5 +67,8 @@ replay_pid*
 *.kexe
 node_modules/
 **/node_modules/
+
+# Local HTTP scratch files can contain gateway tokens.
+mock/mock.http
 
 # The mock/ project keeps its own .gitignore.

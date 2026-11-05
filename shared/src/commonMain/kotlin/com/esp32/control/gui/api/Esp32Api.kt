@@ -1,7 +1,6 @@
 package com.esp32.control.gui.api
 
 import com.esp32.control.contract.ApiErrorEnvelope
-import com.esp32.control.contract.CommandAccepted
 import com.esp32.control.contract.CommandAction
 import com.esp32.control.contract.CommandRequest
 import com.esp32.control.contract.ConfirmLearningRequest
@@ -66,15 +65,22 @@ class Esp32Api(
 
     suspend fun devices(): List<Device> = deviceList().devices
 
+    /**
+     * The command is fire-and-forget: nothing confirms that the RF code was
+     * received, so the response body carries no data the client can use.
+     * Only the status code matters.
+     */
     suspend fun sendCommand(
         deviceId: String,
         action: CommandAction,
         idempotencyKey: String,
-    ): CommandAccepted = client.post("$root/devices/$deviceId/commands") {
-        header("Idempotency-Key", idempotencyKey)
-        contentType(ContentType.Application.Json)
-        setBody(CommandRequest(action))
-    }.bodyOrThrow()
+    ) {
+        client.post("$root/devices/$deviceId/commands") {
+            header("Idempotency-Key", idempotencyKey)
+            contentType(ContentType.Application.Json)
+            setBody(CommandRequest(action))
+        }.ensureSuccess()
+    }
 
     suspend fun removeDevice(deviceId: String) {
         client.delete("$root/devices/$deviceId").ensureSuccess()
