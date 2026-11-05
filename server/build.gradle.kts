@@ -76,5 +76,8 @@ kotlin {
 
 dependencies {
     add("kspLinuxArm64", libs.androidx.room3.compiler)
+    // Each declared native target needs its own KSP compiler dependency;
+    // otherwise Room cannot generate AppDatabaseConstructor for it.
+    add("kspLinuxX64", libs.androidx.room3.compiler)
     add("kspMacosArm64", libs.androidx.room3.compiler)
 }

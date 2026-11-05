@@ -1,0 +1,47 @@
+# The Docker build context is the repository root. Keep credentials and
+# machine-local files out of the daemon/build cache; the Dockerfile copies
+# only `contract/` and `server/` source.
+
+# Version control and IDE state
+.git
+.gitignore
+.gradle/
+**/.gradle/
+.kotlin/
+**/.kotlin/
+.idea/
+**/.idea/
+.lody/
+.DS_Store
+**/.DS_Store
+
+# Build output and runtime artifacts
+build/
+**/build/
+**/captures/
+.data/
+**/.data/
+kotlin-js-store/
+**/kotlin-js-store/
+node_modules/
+**/node_modules/
+*.log
+**/*.log
+*.db
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.db-lck
+
+# Secrets and machine-local configuration
+local.properties
+**/local.properties
+.env
+**/.env
+.env.*
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+*.p12
+*.pfx

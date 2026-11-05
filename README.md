@@ -169,6 +169,79 @@ EMQX 的 WSS 监听器默认使用 8084 端口和 `/mqtt` 路径。`MQTT_TLS=tru
 只能与 `MQTT_TRANSPORT=websocket` 搭配；裸 TCP + TLS 会在启动时直接报错，
 避免再次出现“连接成功但收不到 CONNACK”的情况。
 
+#### 构建服务端镜像（Alpine）
+
+`server/Dockerfile` 使用多阶段构建：构建阶段在 glibc 的 JDK 17 镜像里运行
+Gradle 与 Kotlin/Native，运行阶段基于 Alpine。Kotlin/Native 的 Linux 产物
+链接 glibc，Alpine 通过 `gcompat` 提供 glibc loader 与 libc 兼容层。
+
+```bash
+export GITHUB_ACTOR=<github-user>        # GitHub Packages 用户名
+export GITHUB_TOKEN=<token-with-read:packages>
+
+# 多架构镜像（linux/amd64 + linux/arm64）。多架构结果必须推送到 registry。
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --secret id=github_actor,env=GITHUB_ACTOR \
+  --secret id=github_token,env=GITHUB_TOKEN \
+  -t <registry>/esp32-control-server:latest \
+  --push .
+
+# 本地验证时可只构建当前架构并加载到 docker（--load 只支持单一平台）。
+# amd64 主机把 linux/arm64 换成 linux/amd64。
+docker buildx build \
+  --platform linux/arm64 \
+  --secret id=github_actor,env=GITHUB_ACTOR \
+  --secret id=github_token,env=GITHUB_TOKEN \
+  -t esp32-control-server:local \
+  --load .
+
+docker run --rm --name esp32-server \
+  --network mock_default \
+  -p 8080:8080 \
+  -e MQTT_HOST=emqx -e MQTT_PORT=1883 \
+  -v esp32-data:/data \
+  esp32-control-server:local
+```
+
+- `docker buildx build --platform ...` 会为每个平台注入 `TARGETOS/TARGETARCH`，
+  Dockerfile 将它们映射到 `linkReleaseExecutableLinuxX64`（linux/amd64）和
+  `linkReleaseExecutableLinuxArm64`（linux/arm64），最终合并为多架构 manifest。
+- 构建阶段固定在 `linux/amd64`：Kotlin/Native 只支持 Linux x86_64 作为编译
+  宿主，但可以从该宿主交叉编译出 linux/amd64 与 linux/arm64 两个产物。在
+  Apple Silicon / arm64 主机上，这一步通过 QEMU 模拟 amd64，会比较慢；多架构
+  构建建议放在 amd64 CI 或远程 builder 上。Gradle 与 Kotlin/Native 缓存使用
+  `sharing=locked` 的 cache mount，多平台并行构建时不会互相竞争。
+- 多架构 manifest 需要 `--push`；`--load` 只支持单一平台。若默认 builder
+  使用 docker driver 且未启用 containerd image store，先创建容器 builder：
+
+  ```bash
+  docker buildx create --name esp32-builder --driver docker-container --use
+  docker buildx inspect --bootstrap
+  ```
+
+- 构建需要网络：Gradle 依赖和 Kotlin/Native 工具链在首次构建时下载。
+- 容器以 UID 10001 的非 root 用户运行，数据库默认在 `/data`。使用 bind
+  mount 时先确保目录对该 UID 可写；命名卷无需额外处理。
+- MQTT 凭据通过环境变量传入，或用 `CONFIG_FILE` 指向挂载的配置文件；
+  不要把 `.env` 打进镜像。
+
+#### 在 GitHub Actions 中发布
+
+`.github/workflows/server-image.yml` 在 push 到 `main`、推送 `v*` 标签或手动
+触发时，用同一份 Dockerfile 构建 `linux/amd64` + `linux/arm64` 镜像并推送到
+GitHub Container Registry：
+
+```
+ghcr.io/ktkongtong/esp-ev1527-server:latest
+ghcr.io/ktkongtong/esp-ev1527-server:sha-<commit>
+```
+
+PR 只构建、不推送。`main` 推送产生 `main`、`sha-*` 与 `latest`；`v1.2.3` 标签
+额外产生 `1.2.3` 与 `1.2`。工作流用仓库 Secret `GH_TOKEN`（classic PAT，
+`read:packages`）读取 GitHub Packages 中的 `ktor-mqtt`，需要在
+Settings → Secrets and variables → Actions 中手动添加。
+
 ### 3. 启动 Web 端
 
 ```bash
