@@ -14,9 +14,10 @@
 # platform; a multi-platform result must be pushed to a registry.
 #
 # Kotlin/Native emits Linux executables linked against glibc (the ELF
-# interpreter is /lib/ld-linux-*.so.*), and the compiler itself runs on a
-# glibc host. The build stage therefore uses a glibc JDK image; the runtime
-# stage is Alpine with gcompat providing the glibc loader and libc shims.
+# interpreter is /lib/ld-linux-*.so.*), so both stages run on glibc. Do not
+# move the runtime stage to Alpine: its musl libc needs the gcompat shim,
+# which intermittently loses thread wakeups and silently stalls the coroutine
+# dispatcher. The process keeps running but stops answering, with no logs.
 
 # Kotlin/Native supports Linux x86_64 as a compiler host, but not Linux
 # arm64. The build stage therefore runs on linux/amd64 and cross-compiles both
@@ -73,14 +74,18 @@ RUN --mount=type=secret,id=github_actor \
          "server/build/bin/$out/releaseExecutable/esp32-control-server.kexe" \
          /out/server.kexe
 
-FROM alpine:3.24
+FROM debian:bookworm-slim
 
-# gcompat provides the glibc loader and libc/libpthread/etc. shims the
-# Kotlin/Native binary expects; zlib and libgcc back its remaining dynamic
-# dependencies. ca-certificates is required for MQTT over WSS.
-RUN apk add --no-cache ca-certificates gcompat libgcc zlib \
-    && addgroup -S -g 10001 app \
-    && adduser -S -D -H -u 10001 -G app app \
+# The binary is linked against glibc, so the runtime uses a real glibc instead
+# of Alpine's musl plus the gcompat shim. zlib1g backs its remaining dynamic
+# dependency; ca-certificates is required for MQTT over WSS; wget is used by
+# HEALTHCHECK.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates zlib1g wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 app \
+    && useradd --uid 10001 --gid app --no-create-home --home-dir /data \
+         --shell /usr/sbin/nologin app \
     && mkdir -p /data \
     && chown app:app /data
 

@@ -38,7 +38,7 @@ jobs:
       - name: Set image name
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
-      # arm64 runtime layers (alpine + apk add) execute under emulation on the
+      # arm64 runtime layers (debian + apt-get) execute under emulation on the
       # amd64 runner. The build stage itself stays on amd64, so Kotlin/Native
       # runs natively and cross-compiles both targets.
       - name: Set up QEMU

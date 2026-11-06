@@ -169,11 +169,13 @@ EMQX 的 WSS 监听器默认使用 8084 端口和 `/mqtt` 路径。`MQTT_TLS=tru
 只能与 `MQTT_TRANSPORT=websocket` 搭配；裸 TCP + TLS 会在启动时直接报错，
 避免再次出现“连接成功但收不到 CONNACK”的情况。
 
-#### 构建服务端镜像（Alpine）
+#### 构建服务端镜像（Debian）
 
 `server/Dockerfile` 使用多阶段构建：构建阶段在 glibc 的 JDK 17 镜像里运行
-Gradle 与 Kotlin/Native，运行阶段基于 Alpine。Kotlin/Native 的 Linux 产物
-链接 glibc，Alpine 通过 `gcompat` 提供 glibc loader 与 libc 兼容层。
+Gradle 与 Kotlin/Native，运行阶段基于 `debian:bookworm-slim`。Kotlin/Native
+的 Linux 产物链接 glibc，必须有真正的 glibc 运行时；Alpine 的 musl 需要
+`gcompat` 兼容层，实测会在运行一段时间后静默停摆（协程调度器丢失唤醒，
+进程仍在但不处理请求、也不打日志），因此不要改回 Alpine。
 
 ```bash
 export GITHUB_ACTOR=<github-user>        # GitHub Packages 用户名
