@@ -1,6 +1,6 @@
-# The Docker build context is the repository root. Keep credentials and
-# machine-local files out of the daemon/build cache; the Dockerfile copies
-# only `contract/` and `server/` source.
+# Docker builds use the repository root as context. Keep credentials and
+# machine-local files out of the daemon/build cache; each Dockerfile copies
+# only the source it needs (`contract/` + `server/`, or `go-server/`).
 
 # Version control and IDE state
 .git
@@ -32,6 +32,8 @@ node_modules/
 **/*.db-shm
 **/*.db-wal
 **/*.db-lck
+**/esp32-control-server
+**/esp32controlserver
 
 # Secrets and machine-local configuration
 local.properties
