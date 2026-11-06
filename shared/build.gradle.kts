@@ -42,6 +42,7 @@ kotlin {
         commonMain.dependencies {
             api(project(":contract"))
             api(libs.compose.runtime)
+            api(libs.compose.animation)
             api(libs.compose.foundation)
             api(libs.compose.material3)
             api(libs.compose.ui)
@@ -51,6 +52,7 @@ kotlin {
             implementation(libs.kotlinx.serialization.json)
             // DataStore Preferences is KMP (Android, JVM, native, wasmJs).
             implementation(libs.androidx.datastore.preferences.core)
+            implementation(libs.androidx.lifecycle.viewmodel.compose)
             implementation(libs.ktor.client.core)
             implementation(libs.ktor.client.content.negotiation)
             implementation(libs.ktor.serialization.kotlinx.json)

@@ -1,5 +1,12 @@
 package com.esp32.control.gui.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -237,7 +244,17 @@ internal fun BottomChrome(
 
         // Learning belongs to the device list; the settings tab has no
         // primary action.
-        if (selected == BottomTab.Devices) {
+        AnimatedVisibility(
+            visible = selected == BottomTab.Devices,
+            enter = fadeIn(tween(durationMillis = 150)) + scaleIn(
+                animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                initialScale = 0.8f,
+            ),
+            exit = fadeOut(tween(durationMillis = 120)) + scaleOut(
+                animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing),
+                targetScale = 0.8f,
+            ),
+        ) {
             FloatingActionButton(
                 onClick = onLearn,
                 shape = AppShapes.Fab,
