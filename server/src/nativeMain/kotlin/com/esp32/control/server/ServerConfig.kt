@@ -42,6 +42,7 @@ data class ServerConfig(
     val gatewayClientId: String,
     val commandTopic: String,
     val subscribedTopicFilter: String,
+    val logLevel: Log.Level,
 ) {
     companion object {
         fun fromEnvironment(): ServerConfig {
@@ -85,7 +86,15 @@ data class ServerConfig(
                 useTls = useTls,
             )
 
-            println(mqtt)
+            // Debug is the default while the gateway contract is still being
+            // brought up; production deployments can raise it to info.
+            val logLevel = when (val raw = setting("LOG_LEVEL")?.lowercase() ?: "debug") {
+                "debug" -> Log.Level.DEBUG
+                "info" -> Log.Level.INFO
+                "warn", "warning" -> Log.Level.WARN
+                "error" -> Log.Level.ERROR
+                else -> error("LOG_LEVEL must be debug, info, warn or error, got: $raw")
+            }
 
             return ServerConfig(
                 host = host,
@@ -95,6 +104,7 @@ data class ServerConfig(
                 gatewayClientId = setting("GATEWAY_CLIENT_ID") ?: "OpenMQTTGateway_ESP32_315M",
                 commandTopic = "$topicPrefix/commands/MQTTto433",
                 subscribedTopicFilter = "$topicPrefix/#",
+                logLevel = logLevel,
             )
         }
 

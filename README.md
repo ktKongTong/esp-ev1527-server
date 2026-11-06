@@ -389,6 +389,7 @@ v1.2.0 不提供事件流。客户端按场景轮询快照：学习 1s、设备�
 | `MQTT_TOPIC_PREFIX` | `home/OpenMQTTGateway` | 命令、LWT、版本、抓码的公共前缀 |
 | `GATEWAY_CLIENT_ID` | `OpenMQTTGateway_ESP32_315M` | UI/诊断展示用网关 ClientID |
 | `DATABASE_PATH` | `esp32-control.db` | SQLite 文件路径；相对路径基于进程工作目录 |
+| `LOG_LEVEL` | `debug` | 日志级别：`debug` / `info` / `warn` / `error`；`debug` 打印每条 MQTT 报文与 HTTP 请求 |
 | `CONFIG_FILE` | 空 | 额外的 `KEY=VALUE` 配置文件路径；未设置时尝试 `.env`、`server/.env` |
 
 设备、命令、幂等 key 与 tombstone 持久化在 SQLite（Room3）。网关在线状态

@@ -1,7 +1,9 @@
 package com.esp32.control.server.mqtt
 
+import com.esp32.control.server.Log
 import com.esp32.control.server.MqttConfig
 import com.esp32.control.server.MqttTransportType
+import com.esp32.control.server.logPreview
 import de.kempmobil.ktor.mqtt.Disconnected
 import de.kempmobil.ktor.mqtt.MqttClient
 import de.kempmobil.ktor.mqtt.MqttClientConfigBuilder
@@ -50,7 +52,7 @@ class MqttTransport(
     private val scope = CoroutineScope(
         SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, cause ->
             if (cause !is CancellationException) {
-                println("MQTT background coroutine failed: ${cause.message}")
+                Log.error(cause) { "[mqtt] background coroutine failed" }
             }
         },
     )
@@ -88,12 +90,20 @@ class MqttTransport(
     fun start(): Job = scope.launch {
         launch {
             client.publishedPackets.collect { publish ->
+                val payload = publish.payload.toByteArray()
+                Log.debug {
+                    "[mqtt] <- ${publish.topic.name} " +
+                        "qos=${publish.qoS} retain=${publish.isRetainMessage} " +
+                        "payload=${payload.logPreview()}"
+                }
                 try {
-                    onMessage(MqttMessage(publish.topic.name, publish.payload.toByteArray()))
+                    onMessage(MqttMessage(publish.topic.name, payload))
                 } catch (e: CancellationException) {
                     throw e
                 } catch (cause: Throwable) {
-                    println("MQTT message handler failed: ${cause.message}")
+                    Log.error(cause) {
+                        "[mqtt] message handler failed for ${publish.topic.name}"
+                    }
                 }
             }
         }
@@ -106,10 +116,14 @@ class MqttTransport(
             val sessionStartedAt = TimeSource.Monotonic.markNow()
             var sessionEstablished = false
             try {
-                println("connecting to $endpoint for $topicFilter")
+                Log.info { "[mqtt] connecting to $endpoint for $topicFilter" }
                 val connack = client.connect(isCleanStart = true).getOrThrow()
                 if (!connack.isSuccess) {
                     throw MqttUnavailableException("MQTT CONNACK rejected: ${connack.reason}")
+                }
+                Log.debug {
+                    "[mqtt] CONNACK ${connack.reason} sessionPresent=${connack.isSessionPresent} " +
+                        "serverKeepAlive=${connack.serverKeepAlive}"
                 }
                 val suback = client.subscribe(
                     buildFilterList {
@@ -121,7 +135,7 @@ class MqttTransport(
                 }
 
                 sessionEstablished = true
-                println("MQTT session established: $endpoint")
+                Log.info { "[mqtt] session established: $endpoint subscribed=$topicFilter" }
 
                 // ktor-mqtt does not reconnect by itself. Wait for the engine
                 // to report the socket loss, then rebuild the session above.
@@ -129,8 +143,7 @@ class MqttTransport(
             } catch (e: CancellationException) {
                 throw e
             } catch (cause: Throwable) {
-                cause.printStackTrace()
-                println("MQTT session failed: ${cause.message}")
+                Log.error(cause) { "[mqtt] session failed on $endpoint" }
             } finally {
                 if (sessionEstablished) {
                     runCatching { onDisconnected() }
@@ -150,12 +163,13 @@ class MqttTransport(
     }
 
     suspend fun publish(topic: String, payload: ByteArray) {
+        Log.debug { "[mqtt] -> $topic payload=${payload.logPreview()}" }
         val request = PublishRequest(topic) {
             desiredQoS = QoS.AT_LEAST_ONCE
             payload(ByteString(payload))
         }
         client.publish(request).getOrElse {
-            throw MqttUnavailableException("MQTT publish failed", it)
+            throw MqttUnavailableException("MQTT publish failed for $topic", it)
         }
     }
 

@@ -1,5 +1,6 @@
 package com.esp32.control.server.mqtt
 
+import com.esp32.control.server.Log
 import de.kempmobil.ktor.mqtt.ConnectionException
 import de.kempmobil.ktor.mqtt.MalformedPacketException
 import de.kempmobil.ktor.mqtt.MqttEngine
@@ -84,11 +85,13 @@ internal class WebSocketMqttEngine(
             session = client.webSocketSession(endpoint.toString()) {
                 headers[HttpHeaders.SecWebSocketProtocol] = "mqtt"
             }.also { opened ->
+                Log.info { "[mqtt-ws] websocket open: $endpoint" }
                 _connected.value = true
                 receiverJob = scope.launch { opened.incomingMessagesLoop() }
             }
             Result.success(Unit)
         } catch (cause: Exception) {
+            Log.error(cause) { "[mqtt-ws] websocket connect failed: $endpoint" }
             Result.failure(ConnectionException("Cannot connect to $endpoint", cause))
         }
     }
@@ -133,14 +136,16 @@ internal class WebSocketMqttEngine(
         try {
             for (frame in incoming) {
                 if (frame is Frame.Binary) {
+                    Log.debug { "[mqtt-ws] frame ${frame.data.size}B" }
                     channel.writeFully(frame.readBytes())
                 }
             }
         } catch (_: CancellationException) {
             // Session was closed by disconnect() or by the caller.
         } catch (cause: Exception) {
-            println("MQTT WebSocket receive failed: ${cause.message}")
+            Log.error(cause) { "[mqtt-ws] receive failed: $endpoint" }
         } finally {
+            Log.debug { "[mqtt-ws] receive loop closed: $endpoint" }
             disconnect()
             reader.cancel()
             channel.close()

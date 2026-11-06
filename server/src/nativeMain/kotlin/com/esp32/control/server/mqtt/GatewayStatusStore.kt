@@ -4,6 +4,7 @@ import com.esp32.control.contract.GatewayState
 import com.esp32.control.contract.GatewayStatus
 import com.esp32.control.contract.ReceiverState
 import com.esp32.control.contract.ReceiverStatus
+import com.esp32.control.server.Log
 import com.esp32.control.server.nowEpochMs
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -57,6 +58,10 @@ class GatewayStatusStore(
                 receiverState = ReceiverState.UNKNOWN
             }
 
+            Log.info {
+                "[gateway] $previousState -> $state clientId=$gatewayClientId " +
+                    "version=${this.version ?: "n/a"}"
+            }
             true
         }
 

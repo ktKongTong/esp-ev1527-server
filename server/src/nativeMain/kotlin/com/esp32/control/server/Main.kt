@@ -58,8 +58,19 @@ import kotlinx.coroutines.ensureActive
 
 fun main() {
     val config = runCatching { ServerConfig.fromEnvironment() }.getOrElse { cause ->
-        println("Configuration error: ${cause.message}")
+        Log.error { "configuration error: ${cause.message}" }
         exitProcess(1)
+    }
+    Log.configure(config.logLevel)
+    Log.info {
+        "esp32-control-server $SERVER_VERSION (contract $CONTRACT_VERSION) " +
+            "logLevel=${config.logLevel}"
+    }
+    // MqttConfig.toString() masks credentials.
+    Log.info { config.mqtt.toString() }
+    Log.info {
+        "http=${config.host}:${config.port} database=${config.databasePath} " +
+            "subscribe=${config.subscribedTopicFilter} command=${config.commandTopic}"
     }
     val startedAtEpochMs = nowEpochMs()
     val database = createDatabase(config.databasePath)
@@ -114,20 +125,24 @@ fun main() {
                 if (it is CancellationException) {
                     ensureActive()
                 }
+                Log.error(it) { "background task failed: learning tick" }
             }
             runCatching { commandService.purge(nowEpochMs()) }.onFailure {
                 if (it is CancellationException) {
                     ensureActive()
                 }
+                Log.error(it) { "background task failed: idempotency purge" }
             }
             runCatching { deviceService.purge(nowEpochMs()) }.onFailure {
                 if (it is CancellationException) {
                     ensureActive()
                 }
+                Log.error(it) { "background task failed: tombstone purge" }
             }
         }
     }
 
+    Log.info { "HTTP server starting on ${config.host}:${config.port}" }
     embeddedServer(CIO, host = config.host, port = config.port) {
         installModules()
 

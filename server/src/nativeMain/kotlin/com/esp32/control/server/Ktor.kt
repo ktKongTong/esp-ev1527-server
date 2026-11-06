@@ -18,12 +18,17 @@ import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.contentType
+import io.ktor.server.request.httpMethod
+import io.ktor.server.request.uri
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.util.AttributeKey
 import kotlinx.coroutines.CancellationException
 
 private val RequestIdKey = AttributeKey<String>("esp32.requestId")
+
+private fun ApplicationCall.requestId(): String =
+    if (attributes.contains(RequestIdKey)) attributes[RequestIdKey] else "-"
 
 private val RequestContextPlugin = createApplicationPlugin("RequestContext") {
     onCall { call ->
@@ -36,6 +41,16 @@ private val RequestContextPlugin = createApplicationPlugin("RequestContext") {
         call.attributes.put(RequestIdKey, requestId)
         call.response.header("X-Request-Id", requestId)
         call.response.header(HttpHeaders.CacheControl, "no-store")
+        Log.debug {
+            "[http] -> ${call.request.httpMethod.value} ${call.request.uri} requestId=$requestId"
+        }
+    }
+    onCallRespond { call, _ ->
+        // An unset status is the implicit 200 OK, so report it that way.
+        Log.debug {
+            "[http] <- ${call.response.status()?.value ?: 200} " +
+                "${call.request.httpMethod.value} ${call.request.uri} requestId=${call.requestId()}"
+        }
     }
 }
 private suspend fun ApplicationCall.respondApiError(
@@ -44,7 +59,7 @@ private suspend fun ApplicationCall.respondApiError(
     message: String,
     details: Map<String, String>? = null,
 ) {
-    val requestId = if (attributes.contains(RequestIdKey)) attributes[RequestIdKey] else newId("req")
+    val requestId = requestId().takeUnless { it == "-" } ?: newId("req")
     respond(
         status,
         ApiErrorEnvelope(
@@ -78,6 +93,10 @@ fun Application.installModules() {
     }
     install(StatusPages) {
         exception<ApiException> { call, cause ->
+            Log.warn {
+                "[http] ${cause.status.value} ${cause.code} ${call.request.uri} " +
+                    "requestId=${call.requestId()}"
+            }
             call.respondApiError(cause.status, cause.code, cause.message, cause.details)
         }
         exception<ContentTransformationException> { call, _ ->
@@ -105,6 +124,9 @@ fun Application.installModules() {
         }
         exception<Throwable> { call, cause ->
             if (cause is CancellationException) throw cause
+            Log.error(cause) {
+                "[http] 500 ${call.request.uri} requestId=${call.requestId()}"
+            }
             val message = cause.message.orEmpty()
             if (message.contains("Cannot transform this request's content", ignoreCase = true)) {
                 val contentType = call.request.contentType()

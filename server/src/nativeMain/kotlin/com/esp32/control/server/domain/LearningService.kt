@@ -14,6 +14,7 @@ import com.esp32.control.contract.ReceiverState
 import com.esp32.control.contract.RfParameters
 import com.esp32.control.contract.StartLearningRequest
 import com.esp32.control.server.ApiException
+import com.esp32.control.server.Log
 import com.esp32.control.server.data.DeviceRepository
 import com.esp32.control.server.db.AppDatabase
 import com.esp32.control.server.deviceRemoved
@@ -48,12 +49,21 @@ class LearningService(
 
         val gatewayStatus = gateway.snapshot()
         if (gatewayStatus.state != GatewayState.ONLINE) {
+            Log.warn {
+                "[learning] start rejected: gateway=${gatewayStatus.state} " +
+                    "receiver=${gatewayStatus.receiver.state}"
+            }
             throw unavailable("gateway_unavailable", "Gateway is not online")
         }
         if (gatewayStatus.receiver.state == ReceiverState.UNAVAILABLE) {
+            Log.warn { "[learning] start rejected: receiver unavailable" }
             throw unavailable("receiver_unavailable", "The 315MHz receiver is unavailable")
         }
         activeLocked()?.let { active ->
+            Log.warn {
+                "[learning] start rejected: session ${active.session.id} " +
+                    "already active (${active.session.state})"
+            }
             throw ApiException(
                 HttpStatusCode.Conflict,
                 "learning_busy",
@@ -89,6 +99,10 @@ class LearningService(
             terminalAtEpochMs = null,
             deviceId = null,
         )
+        Log.info {
+            "[learning] session ${session.id} started: collect window " +
+                "${COLLECTION_WINDOW_MS / 1000}s"
+        }
         session
     }
 
@@ -113,12 +127,18 @@ class LearningService(
                 session.acceptedOnCandidateId == candidate.id ||
                     session.acceptedOffCandidateId == candidate.id
                 )
-            if (alreadyAccepted) return@withLock session
+            if (alreadyAccepted) {
+                Log.debug { "[learning] accept ${candidate.id} ignored: already accepted" }
+                return@withLock session
+            }
 
             val state = session.state
             if (state != LearningState.CANDIDATE_ON_READY &&
                 state != LearningState.CANDIDATE_OFF_READY
             ) {
+                Log.warn {
+                    "[learning] accept ${candidate.id} rejected: session ${session.id} state=$state"
+                }
                 throw ApiException(
                     HttpStatusCode.Conflict,
                     "learning_not_ready",
@@ -131,6 +151,11 @@ class LearningService(
                 LearningSlot.TURN_ON
             }
             if (candidate.slot != currentSlot || !candidate.qualified || candidate.accepted) {
+                Log.warn {
+                    "[learning] accept ${candidate.id} rejected: slot=${candidate.slot} " +
+                        "qualified=${candidate.qualified} accepted=${candidate.accepted} " +
+                        "currentSlot=$currentSlot"
+                }
                 throw ApiException(
                     HttpStatusCode.Conflict,
                     "candidate_not_ready",
@@ -139,6 +164,10 @@ class LearningService(
             }
 
             devices.findOwner(candidate.protocol, candidate.length, candidate.value)?.let { owner ->
+                Log.warn {
+                    "[learning] accept ${candidate.id} rejected: code ${candidate.value} " +
+                        "owned by $owner"
+                }
                 throw ApiException(
                     HttpStatusCode.Conflict,
                     "code_already_registered",
@@ -149,9 +178,15 @@ class LearningService(
             if (currentSlot == LearningSlot.TURN_ON) {
                 val gatewayStatus = gateway.snapshot()
                 if (gatewayStatus.state != GatewayState.ONLINE) {
+                    Log.warn {
+                        "[learning] accept ${candidate.id} rejected: gateway=${gatewayStatus.state}"
+                    }
                     throw unavailable("gateway_unavailable", "Gateway is not online")
                 }
                 if (gatewayStatus.receiver.state == ReceiverState.UNAVAILABLE) {
+                    Log.warn {
+                        "[learning] accept ${candidate.id} rejected: receiver unavailable"
+                    }
                     throw unavailable(
                         "receiver_unavailable",
                         "The 315MHz receiver is unavailable",
@@ -188,6 +223,10 @@ class LearningService(
                 )
             }
             sessions[sessionId] = record.copy(session = updated)
+            Log.info {
+                "[learning] session $sessionId accepted ${candidate.id} " +
+                    "slot=$currentSlot value=${candidate.value} -> ${updated.state}"
+            }
             updated
         }
 
@@ -202,17 +241,26 @@ class LearningService(
             LearningState.COLLECTING_OFF, LearningState.CANDIDATE_OFF_READY ->
                 LearningSlot.TURN_OFF
 
-            else -> throw ApiException(
-                HttpStatusCode.Conflict,
-                "learning_not_ready",
-                "The session cannot be rescanned in its current state",
-            )
+            else -> {
+                Log.warn {
+                    "[learning] rescan ${session.id} rejected: state=${session.state}"
+                }
+                throw ApiException(
+                    HttpStatusCode.Conflict,
+                    "learning_not_ready",
+                    "The session cannot be rescanned in its current state",
+                )
+            }
         }
         val gatewayStatus = gateway.snapshot()
         if (gatewayStatus.state != GatewayState.ONLINE) {
+            Log.warn {
+                "[learning] rescan ${session.id} rejected: gateway=${gatewayStatus.state}"
+            }
             throw unavailable("gateway_unavailable", "Gateway is not online")
         }
         if (gatewayStatus.receiver.state == ReceiverState.UNAVAILABLE) {
+            Log.warn { "[learning] rescan ${session.id} rejected: receiver unavailable" }
             throw unavailable("receiver_unavailable", "The 315MHz receiver is unavailable")
         }
 
@@ -228,6 +276,7 @@ class LearningService(
             candidates = session.candidates.filter { it.slot != slot || it.accepted },
         )
         sessions[sessionId] = record.copy(session = updated)
+        Log.info { "[learning] session $sessionId rescanned: slot=$slot -> ${updated.state}" }
         updated
     }
 
@@ -239,6 +288,9 @@ class LearningService(
             val record = activeRecord(sessionId)
             val session = record.session
             if (session.state != LearningState.READY) {
+                Log.warn {
+                    "[learning] test ${session.id} rejected: state=${session.state}"
+                }
                 throw ApiException(
                     HttpStatusCode.Conflict,
                     "learning_not_ready",
@@ -246,6 +298,7 @@ class LearningService(
                 )
             }
             if (!gateway.isOnline()) {
+                Log.warn { "[learning] test ${session.id} rejected: gateway offline" }
                 throw unavailable("gateway_unavailable", "Gateway is not online")
             }
             val acceptedId = if (slot == LearningSlot.TURN_ON) {
@@ -254,11 +307,17 @@ class LearningService(
                 session.acceptedOffCandidateId
             }
             candidate = session.candidates.firstOrNull { it.id == acceptedId && it.accepted }
-                ?: throw ApiException(
-                    HttpStatusCode.Conflict,
-                    "learning_not_ready",
-                    "The requested slot has no accepted candidate",
-                )
+                ?: run {
+                    Log.warn {
+                        "[learning] test ${session.id} rejected: no accepted candidate " +
+                            "for slot=$slot"
+                    }
+                    throw ApiException(
+                        HttpStatusCode.Conflict,
+                        "learning_not_ready",
+                        "The requested slot has no accepted candidate",
+                    )
+                }
         }
 
         val accepted = candidate ?: error("accepted candidate missing")
@@ -274,10 +333,14 @@ class LearningService(
             )
         } catch (e: ApiException) {
             throw e
-        } catch (_: Throwable) {
+        } catch (cause: Throwable) {
+            Log.error(cause) { "[learning] test dispatch failed for session $sessionId" }
             throw unavailable("gateway_unavailable", "Failed to publish test code")
         }
 
+        Log.info {
+            "[learning] session $sessionId test dispatched slot=$slot value=${accepted.value}"
+        }
         return LearningTestResult(
             testId = testId,
             sessionId = sessionId,
@@ -320,6 +383,7 @@ class LearningService(
         }
         val session = existing.session
         if (session.state != LearningState.READY) {
+            Log.warn { "[learning] confirm ${session.id} rejected: state=${session.state}" }
             throw ApiException(
                 HttpStatusCode.Conflict,
                 "learning_not_ready",
@@ -330,6 +394,7 @@ class LearningService(
         val name = request.name.trim()
         val location = request.location.trim()
         if (name.isEmpty() || name.length > 64 || location.isEmpty() || location.length > 64) {
+            Log.warn { "[learning] confirm ${session.id} rejected: invalid name or location" }
             throw invalidRequest("name and location must be 1-64 characters")
         }
 
@@ -397,13 +462,25 @@ class LearningService(
             terminalAtEpochMs = now,
             deviceId = device.id,
         )
+        Log.info {
+            "[learning] session $sessionId completed: device ${device.id} " +
+                "on=${on.value} off=${off.value}"
+        }
         LearningConfirmation(device = device, session = completed)
     }
 
     suspend fun cancelLearning(sessionId: String) {
         mutex.withLock {
-            val record = sessions[sessionId] ?: return@withLock
-            if (record.session.state in TERMINAL_STATES) return@withLock
+            val record = sessions[sessionId] ?: run {
+                Log.debug { "[learning] cancel $sessionId ignored: session not found" }
+                return@withLock
+            }
+            if (record.session.state in TERMINAL_STATES) {
+                Log.debug {
+                    "[learning] cancel $sessionId ignored: state=${record.session.state}"
+                }
+                return@withLock
+            }
 
             val cancelled = record.session.copy(
                 state = LearningState.CANCELLED,
@@ -417,7 +494,8 @@ class LearningService(
                 active = false,
                 terminalAtEpochMs = now,
             )
-            }
+            Log.info { "[learning] session $sessionId cancelled" }
+        }
     }
 
     /**
@@ -430,22 +508,55 @@ class LearningService(
             val state = record.session.state
             if (state == LearningState.COLLECTING_ON || state == LearningState.COLLECTING_OFF) {
                 failLocked(record, "gateway_offline", now)
+            } else {
+                Log.info {
+                    "[learning] gateway offline during session ${record.session.id} " +
+                        "state=$state, session kept"
+                }
             }
         }
     }
 
     suspend fun onCapture(capture: RfCapture, now: Long) {
         mutex.withLock {
-            val record = activeLocked() ?: return@withLock
+            val record = activeLocked()
+            if (record == null) {
+                Log.debug {
+                    "[learning] capture ${capture.value} ignored: no active session"
+                }
+                return@withLock
+            }
             val session = record.session
             val state = session.state
             if (state != LearningState.COLLECTING_ON && state != LearningState.COLLECTING_OFF) {
+                Log.debug {
+                    "[learning] capture ${capture.value} ignored: session ${session.id} " +
+                        "state=$state (slot closed)"
+                }
                 return@withLock
             }
-            val deadline = session.collectionExpiresAtEpochMs ?: return@withLock
-            if (now >= deadline) return@withLock
+            val deadline = session.collectionExpiresAtEpochMs
+            if (deadline == null) {
+                Log.debug {
+                    "[learning] capture ${capture.value} ignored: session ${session.id} " +
+                        "has no collection window"
+                }
+                return@withLock
+            }
+            if (now >= deadline) {
+                Log.debug {
+                    "[learning] capture ${capture.value} ignored: collection window ended " +
+                        "${now - deadline}ms ago"
+                }
+                return@withLock
+            }
             // The gateway gates EV1527 before this point; keep the domain boundary closed too.
-            if (!Ev1527.isValid(capture.value)) return@withLock
+            if (!Ev1527.isValid(capture.value)) {
+                Log.debug {
+                    "[learning] capture ${capture.value} ignored: value out of EV1527 range"
+                }
+                return@withLock
+            }
 
             val slot = if (state == LearningState.COLLECTING_ON) {
                 LearningSlot.TURN_ON
@@ -457,6 +568,10 @@ class LearningService(
                 it.slot == slot && it.value == capture.value
             }
             if (existing == null && session.candidates.size >= MAX_CANDIDATES) {
+                Log.warn {
+                    "[learning] capture ${capture.value} dropped: candidate limit " +
+                        "$MAX_CANDIDATES reached"
+                }
                 return@withLock
             }
             val conflict = devices.findOwner(
@@ -495,6 +610,13 @@ class LearningService(
                     lastSeenAtEpochMs = now,
                     conflictDeviceId = conflict,
                 )
+            }
+
+            Log.debug {
+                "[learning] capture ${capture.value} slot=$slot " +
+                    "hits=${updatedCandidate.hitCount}/$REQUIRED_HITS " +
+                    "frames=${updatedCandidate.frameCount}" +
+                    (conflict?.let { " conflict=$it" } ?: "")
             }
 
             var candidates = session.candidates.toMutableList()
@@ -540,6 +662,12 @@ class LearningService(
                 candidates = candidates,
             )
             sessions[record.session.id] = record.copy(session = updated)
+            if (qualifiedNow) {
+                Log.info {
+                    "[learning] session ${session.id} slot=$slot qualified " +
+                        "value=${capture.value} -> ${updated.state}"
+                }
+            }
         }
     }
 
@@ -620,6 +748,10 @@ class LearningService(
             active = false,
             terminalAtEpochMs = now,
         )
+        Log.warn {
+            "[learning] session ${record.session.id} failed: $reason " +
+                "(was ${record.session.state})"
+        }
     }
 
     private fun expireLocked(record: LearningRecord, reason: String, now: Long) {
@@ -635,6 +767,10 @@ class LearningService(
             active = false,
             terminalAtEpochMs = now,
         )
+        Log.info {
+            "[learning] session ${record.session.id} expired: $reason " +
+                "(was ${record.session.state})"
+        }
     }
 
     private fun purgeLocked(now: Long) {

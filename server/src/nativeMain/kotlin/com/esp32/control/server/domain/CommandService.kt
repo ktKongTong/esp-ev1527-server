@@ -4,6 +4,7 @@ import androidx.room3.withWriteTransaction
 import com.esp32.control.contract.CommandAction
 import com.esp32.control.contract.CommandDispatched
 import com.esp32.control.server.ApiException
+import com.esp32.control.server.Log
 import com.esp32.control.server.data.DeviceRepository
 import com.esp32.control.server.data.IdempotencyRecord
 import com.esp32.control.server.data.IdempotencyRepository
@@ -69,6 +70,9 @@ class CommandService(
                     "The original command is still being dispatched",
                 )
                 devices.find(deviceId) ?: throw removed(deviceId)
+                Log.debug {
+                    "[command] replay device=$deviceId action=$action key=$idempotencyKey"
+                }
                 replay = CommandDispatchResult(
                     dispatched = CommandDispatched(
                         deviceId = deviceId,
@@ -85,6 +89,9 @@ class CommandService(
                 throw deviceNotFound()
             }
             if (!gateway.isOnline()) {
+                Log.warn {
+                    "[command] rejected device=$deviceId action=$action: gateway offline"
+                }
                 throw ApiException(
                     HttpStatusCode.ServiceUnavailable,
                     "gateway_unavailable",
@@ -123,6 +130,9 @@ class CommandService(
 
         val publishError = runCatching { transmitter.send(spec) }.exceptionOrNull()
         if (publishError != null) {
+            Log.error(publishError) {
+                "[command] publish failed device=$deviceId action=$action value=${spec.value}"
+            }
             // Release the key so the client can retry after the gateway returns.
             db.withWriteTransaction { idempotency.release(idempotencyKey) }
             throw ApiException(
@@ -136,6 +146,10 @@ class CommandService(
             val now = nowEpochMs()
             idempotency.markDispatched(idempotencyKey, now)
             now
+        }
+        Log.info {
+            "[command] dispatched device=$deviceId action=$action value=${spec.value} " +
+                "repeat=${spec.repeat}"
         }
 
         return CommandDispatchResult(
