@@ -98,6 +98,13 @@ docker run -d --name esp32-control-go \
 阶段在 buildx/QEMU 下原生编译。数据库默认写入 `/data/esp32-control.db`，
 容器以 uid 10001 的非 root 用户运行。
 
+每次构建推送两个 tag：
+
+- `go-server`：跟随 `main` 的浮动 tag。
+- `go-server-<version>`：固定到 `go-server/contract.go` 中的 `serverVersion`，
+  与 `/api/v1/health` 返回的 `version` 一致，例如 `go-server-0.2.0`。
+  生产部署建议使用该 tag。
+
 镜像声明了 `VOLUME ["/data"]`。使用命名卷（如上例）无需处理权限；使用 bind
 mount 时，需要先确保宿主目录对 uid 10001 可写：
 
@@ -116,7 +123,8 @@ docker buildx build \
 ```
 
 GitHub Actions 工作流：`.github/workflows/go-server-image.yml`。`main` 分支的
-`go-server/**` 变更会构建并推送 `go-server` tag；Pull Request 只构建不推送。
+`go-server/**` 变更会构建并推送 `go-server` 与 `go-server-<version>` 两个 tag；
+Pull Request 只构建不推送。
 
 ## HTTP 接口
 
