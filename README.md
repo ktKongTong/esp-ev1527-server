@@ -1,11 +1,11 @@
 # ESP32 智能控制台 · Kotlin 全栈
 
 Android + Web 共用一套 Compose UI，Kotlin/Native 服务端通过 MQTT 驱动
-OpenMQTTGateway 315MHz 网关，实现**控制开关、学习新设备、移除旧设备**。
+OpenMQTTGateway 315MHz 网关，实现**控制开关、学习新设备、编辑设备信息、移除旧设备**。
 服务端、Android、Web 三端共享 `contract` 模块中的 HTTP 协议类型，
 避免各端维护同名模型。
 
-当前仓库已实现契约 v2.0.0；协议与状态机的完整定义见
+当前仓库已实现契约 v2.1.0；协议与状态机的完整定义见
 [`docs/api-contract-v1.md`](docs/api-contract-v1.md)。仓库内的
 [`mock/`](mock/README.md) 是可直接联调的 OpenMQTTGateway v1.7+ 仿真器。
 
@@ -16,6 +16,8 @@ OpenMQTTGateway 315MHz 网关，实现**控制开关、学习新设备、移除�
 - **学习新设备**：客户端发起会话 → 服务端关联 60s 采集窗口 → 消费网关持续上报的
   315MHz 抓码 → 按按键间隔聚类 → 同一码被独立按 3 次生成候选 → 客户端确认开/关键
   → 再学另一个键 → 试发 → 命名保存。没有网关抓码就不会产生设备。
+- **编辑设备信息**：`PATCH /devices/{id}` 修改名称或位置；码与 RF 参数不可变，
+  编辑不发送 MQTT，也不改变设备生命周期。
 - **移除设备**：立即拒绝新命令、阻止未发布的发布动作、释放开/关码、写入 tombstone；
   重复删除保持幂等。
 - **持久化**：设备、幂等 key 和 tombstone 保存在 SQLite（Room3 ORM），

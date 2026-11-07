@@ -31,6 +31,9 @@ interface DeviceDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(device: DeviceEntity)
 
+    @Query("UPDATE devices SET name = :name, location = :location WHERE id = :id")
+    suspend fun updateLabels(id: String, name: String, location: String)
+
     @Query("DELETE FROM devices WHERE id = :id")
     suspend fun delete(id: String)
 }

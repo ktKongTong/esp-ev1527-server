@@ -44,6 +44,7 @@ import com.esp32.control.gui.ui.BottomTab
 import com.esp32.control.gui.ui.DeleteIcon
 import com.esp32.control.gui.ui.DeviceCard
 import com.esp32.control.gui.ui.DeviceDetailSheet
+import com.esp32.control.gui.ui.DeviceEditDialog
 import com.esp32.control.gui.ui.DeviceHeader
 import com.esp32.control.gui.ui.EmptyDevices
 import com.esp32.control.gui.ui.ErrorBanner
@@ -220,9 +221,20 @@ private fun AppContent(
             gatewayOnline = state.gatewayOnline,
             errorText = state.error,
             onCommand = { action -> viewModel.sendCommand(device.id, action) },
+            onEdit = { viewModel.openEditor(device.id) },
             onRemove = { viewModel.requestRemoval(device.id) },
             onDismissError = viewModel::dismissError,
             onClose = viewModel::closeDetails,
+        )
+    }
+
+    state.editingDevice?.let { device ->
+        DeviceEditDialog(
+            device = device,
+            busy = state.editBusy,
+            errorText = state.editError,
+            onSave = { name, location -> viewModel.saveDevice(device.id, name, location) },
+            onDismiss = viewModel::closeEditor,
         )
     }
 

@@ -5,7 +5,7 @@ package main
 // stay byte-for-byte compatible with contract/src/commonMain/.../Models.kt.
 
 const (
-	contractVersion = "2.0.0"
+	contractVersion = "2.1.0"
 	apiVersion      = "1"
 	serverVersion   = "0.2.0"
 	serviceName     = "esp32-control-server"
@@ -61,6 +61,13 @@ type device struct {
 type deviceListResponse struct {
 	Devices           []device `json:"devices"`
 	ServerTimeEpochMs int64    `json:"serverTimeEpochMs"`
+}
+
+// updateDeviceRequest is a partial update. A nil field stays unchanged;
+// codes and RF parameters are immutable after learning.
+type updateDeviceRequest struct {
+	Name     *string `json:"name"`
+	Location *string `json:"location"`
 }
 
 type receiverStatus struct {

@@ -1,9 +1,9 @@
 # ESP32 Control 接口、状态机与数据流契约 v1
 
-- 状态：**已实现**（`CONTRACT_VERSION = "2.0.0"`）
+- 状态：**已实现**（`CONTRACT_VERSION = "2.1.0"`）
 - 日期：2026-11-03
-- 适用端：`server`（Ktor + Kotlin/Native）、`androidApp`、`webApp`
-- 覆盖范围：**控制设备开关、学习新设备、移除旧设备**，以及三者依赖的
+- 适用端：`server`（Ktor + Kotlin/Native）、`go-server`、`androidApp`、`webApp`
+- 覆盖范围：**控制设备开关、学习新设备、编辑设备信息、移除旧设备**，以及这些流程依赖的
   网关状态机、设备生命周期、命令发布语义、学习会话状态机和轮询一致性
 
 > 本文定义协议与状态机。DTO、枚举与 `ContractJson` 已落在
@@ -46,6 +46,7 @@
 | `GET` | `/api/v1/health` | `200 HealthResponse` | 服务/网关状态 |
 | `GET` | `/api/v1/devices` | `200 DeviceListResponse` | 设备列表（不含已移除） |
 | `GET` | `/api/v1/devices/{id}` | `200 Device` | 单设备；已移除返回 `410` |
+| `PATCH` | `/api/v1/devices/{id}` | `200 Device` | 编辑名称或位置 |
 | `POST` | `/api/v1/devices/{id}/commands` | `202 CommandDispatched` | 发送开码或关码 |
 | `DELETE` | `/api/v1/devices/{id}` | `204` | 移除设备 |
 | `POST` | `/api/v1/learning/sessions` | `201 LearningSession` | 开始学习（先采集开码） |
@@ -211,9 +212,24 @@ Client ──GET devices（轮询）──► Server ──► 列表不再包�
 | 客户端更新 | 请求后手动刷新/30s 轮询 | 轮询；学习期间 1s、网关 30s |
 | 设备创建 | 启动时两条内存演示数据 | 学习确认后动态创建并持久化 |
 | 设备删除 | 无 | `DELETE` + tombstone + 码释放 |
+| 设备信息编辑 | 无 | `PATCH /devices/{id}` 修改名称/位置 |
 | 开关语义 | `POST toggle` | `POST commands` + 显式开/关动作 |
 | 设备状态 | `on: Boolean` | 无状态字段；只保存开/关码 |
 | 码资源 | 仅展示 | 全局码归属索引，学习时做冲突检测 |
+
+### 2.5 编辑设备信息
+
+```text
+Client ──PATCH /devices/{id} {name?, location?}──► Server
+Server ──200 Device（更新后的快照）──► Client ──替换本地列表项──►
+```
+
+- 只允许修改 `name` 与 `location`；`codeOn`、`codeOff`、`rf`、`createdAtEpochMs`
+  与 `id` 在学习完成后不可变。
+- 编辑不发送 MQTT、不触碰码归属索引，也不改变设备生命周期状态。
+- 编辑与命令、删除可以并发：删除先提交时，编辑返回 `410 device_removed`；
+  编辑先提交时，命令照常使用未受影响的码。
+- 其他客户端在下一次 `GET /devices` 轮询中看到新名称/位置。
 
 ---
 
@@ -492,6 +508,7 @@ stateDiagram-v2
 - 旧开/关码从归属索引删除，可被新设备重新学习。
 - tombstone 保留 24h，用于重复 `DELETE` 和 `410`；之后 `GET` 变 `404`。
 - 移除不发送 MQTT；网关侧无状态可清理。
+- 编辑 `name`/`location` 不改变生命周期：设备保持 `active`，码归属不变。
 
 ### 5.3 命令发布（无持久状态）
 
@@ -658,6 +675,13 @@ data class RfParameters(
     val length: Int,
     val repeat: Int,
 )
+
+/** 编辑请求：null 表示该字段不变；至少提供一个字段。 */
+@Serializable
+data class UpdateDeviceRequest(
+    val name: String? = null,
+    val location: String? = null,
+)
 ```
 
 | 字段 | 说明 |
@@ -666,6 +690,10 @@ data class RfParameters(
 | `rf.protocol` / `rf.length` | `rf.length` 固定为 `24`；`rf.protocol` 保存开码捕获时网关上报的值，仅作元数据；同对开/关码必须来自同一 20-bit address |
 | `rf.repeat` | 发射重复次数，默认 5 |
 | `createdAtEpochMs` | 学习确认时间 |
+
+`name` 与 `location` 是仅有的可编辑字段：`PATCH` 时省略或传 `null` 表示不修改，
+提供的值 trim 后必须为 1–64 个字符。`codeOn`、`codeOff`、`rf`、`id` 与
+`createdAtEpochMs` 在学习完成后不可变。
 
 设备没有 `state`、`stateEvidence`、`online`、`lastAction` 或 `revision`。
 控制前后 `Device` 不变：
@@ -1419,7 +1447,23 @@ active --DELETE--> removed
 - 404 `device_not_found`
 - 410 `device_removed`（tombstone 内）
 
-### 11.4 `POST /api/v1/devices/{deviceId}/commands`
+### 11.4 `PATCH /api/v1/devices/{deviceId}`
+
+请求体至少包含一个字段：
+
+```json
+{ "name": "2 号增氧机", "location": "西侧鱼塘" }
+```
+
+- 200 `Device`（更新后的完整快照）
+- `null` 或省略的字段保持不变；提供的值 trim 后必须为 1–64 字符，
+  否则 `400 invalid_request`
+- 空对象 `{}` → `400 invalid_request`
+- 404 `device_not_found`
+- 410 `device_removed`（tombstone 内）
+- 只修改 `name` / `location`；码与 RF 参数不变，不发送 MQTT
+
+### 11.5 `POST /api/v1/devices/{deviceId}/commands`
 
 请求：
 
@@ -1437,14 +1481,14 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - 必须带 `Idempotency-Key`
 - 不返回设备快照，不保存命令记录
 
-### 11.5 `DELETE /api/v1/devices/{deviceId}`
+### 11.6 `DELETE /api/v1/devices/{deviceId}`
 
 - 204 无响应体
 - 幂等；重复删除 204
 - 404 未知设备
 - 事件 `device.removed`
 
-### 11.6 `POST /api/v1/learning/sessions`
+### 11.7 `POST /api/v1/learning/sessions`
 
 请求体可省略或：
 
@@ -1462,12 +1506,12 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
   `protocol` 不参与门控），并按 `value` 聚类，
   同一码独立按 3 次后进入 `candidate_on_ready`。
 
-### 11.7 `GET /api/v1/learning/sessions/{sessionId}`
+### 11.8 `GET /api/v1/learning/sessions/{sessionId}`
 
 - 200 `LearningSession`（含终态，保留 5 分钟）
 - 404 `learning_session_not_found`
 
-### 11.8 `POST .../candidates/{candidateId}/accept`
+### 11.9 `POST .../candidates/{candidateId}/accept`
 
 无请求体。
 
@@ -1480,7 +1524,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - 事件 `learning.updated`
 - 开码候选接受后 → `collecting_off`；关码候选接受后 → `ready`。
 
-### 11.9 `POST .../rescan`
+### 11.10 `POST .../rescan`
 
 无请求体。
 
@@ -1491,7 +1535,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - 丢弃当前槽位候选，重新打开 60s 采集窗口
 - 事件 `learning.updated`
 
-### 11.10 `POST .../test`
+### 11.11 `POST .../test`
 
 ```json
 { "slot": "turn_on" }
@@ -1502,7 +1546,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - 503 `gateway_unavailable`
 - 使用已接受的候选码；不创建设备、不写命令表。
 
-### 11.11 `POST .../confirm`
+### 11.12 `POST .../confirm`
 
 ```json
 {
@@ -1519,7 +1563,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - 服务端使用 `acceptedOnCandidateId` / `acceptedOffCandidateId` 对应的候选码；
   请求体不再携带 capture/candidate ID。
 
-### 11.12 `DELETE /api/v1/learning/sessions/{sessionId}`
+### 11.13 `DELETE /api/v1/learning/sessions/{sessionId}`
 
 - 204
 - 幂等
@@ -1559,7 +1603,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 ## 13. 版本演进与兼容
 
 - 路径版本 `/api/v1`，`HealthResponse.apiVersion = "1"`。
-- `contract` 模块语义版本 `CONTRACT_VERSION = "2.0.0"`。
+- `contract` 模块语义版本 `CONTRACT_VERSION = "2.1.0"`。
   - `1.1.0`（2026-11-03）：学习改为“按键聚类 + 候选确认”模型；
     新增 candidate accept / rescan，移除旧的重学/手动指定接口。
   - `1.2.0`（2026-11-03）：移除 SSE 事件类型与 `GET /api/v1/events`；
@@ -1581,6 +1625,9 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
     只保留 10 分钟幂等去重。原因是 315MHz 单向链路没有 ACK，
     服务端无法观测设备状态，也不应保存命令历史。
     路径仍为 `/api/v1`，但 DTO 删除字段属于破坏性变更，客户端必须同步升级。
+  - `2.1.0`（2026-11-06）：新增 `PATCH /api/v1/devices/{id}` 与
+    `UpdateDeviceRequest`，允许编辑设备名称和位置。只修改 `name` / `location`，
+    不动码、RF 参数与生命周期；属于向后兼容的增量端点。
 - 允许：新增响应字段、新增端点、新增错误码（旧客户端忽略未知字段）。
 - 需要客户端先行：新增枚举值（严格反序列化会失败）。
 - 破坏性：删除/重命名字段、改变类型/语义、改变状态码、改变状态机语义
@@ -1640,21 +1687,30 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
     并立即刷新设备列表。
 11. 离开页面时若会话仍活动 → 调用 DELETE 取消（或等待过期）。
 
-### 14.3 移除
+### 14.3 编辑设备信息
+
+1. 设备详情 → “编辑”，弹出名称/位置表单，预填当前值。
+2. 保存时 `PATCH /devices/{id}`，客户端同时提交两个字段。
+3. 200 → 用返回的 `Device` 替换本地列表项，关闭表单，不等待下一次轮询。
+4. 400 → 在表单内展示校验错误，保留用户输入。
+5. 404/410 → 视为设备已不存在，移除卡片并关闭表单。
+6. 编辑不要求网关在线，也不影响正在发送的命令。
+
+### 14.4 移除
 
 1. 二次确认 → `DELETE`。
 2. 204 → 移除卡片；410/404 同样视为已不存在。
 3. 若收到 409/网络错误 → 刷新列表，不要凭猜测删除。
 4. 其他客户端发起的移除在下次 `GET /devices` 轮询中体现。
 
-### 14.4 重连与一致性
+### 14.5 重连与一致性
 
 - 启动/重连：`GET health` + `GET devices`；设备没有 revision。
 - 按第 10 节的周期轮询；页面恢复可见时立即拉一次快照。
 - 网络恢复后先拉快照，再恢复轮询；不依赖增量补齐。
 - 快照是最终依据。
 
-### 14.5 本地化映射
+### 14.6 本地化映射
 
 | 契约值 | 中文 |
 | --- | --- |
@@ -1748,7 +1804,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 
 ## 17. 与当前实现的差异与迁移
 
-| 项 | 上一版 | 当前（contract 2.0.0） |
+| 项 | 上一版 | 当前（contract 2.1.0） |
 | --- | --- | --- |
 | MQTT | KMQTT 适配层 | ktor-mqtt（MQTT 5 客户端），保留重连监督 |
 | 持久化 | 进程内状态 | SQLite + Room3，重启不丢设备/幂等 key |
@@ -1757,6 +1813,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 | 设备状态 | `on: Boolean` | 无状态字段；只保存开/关码 |
 | 最近动作 | 中文 `lastAction: String` | 已删除；不保存命令历史 |
 | 设备移除 | 无 | `DELETE /devices/{id}` + tombstone + 码释放 |
+| 设备信息编辑 | 无 | `PATCH /devices/{id}`（名称/位置） |
 | 学习 | 无 | 网关接收器常开上报 + 按键聚类 + 候选确认状态机 + SQLite |
 | 设备列表 | 裸数组 | `{ devices, serverTimeEpochMs }` |
 | 事件 | SSE + 轮询降级 | 仅轮询（SSE 已移除） |
@@ -1832,7 +1889,17 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - [ ] 删除后到达的控制请求返回 410，不发布。
 - [ ] 其他客户端在下次 `GET /devices` 时不再看到该设备。
 
-### 18.4 轮询与持久化
+### 18.4 编辑
+
+- [ ] PATCH 只带 `name` → 位置不变；只带 `location` → 名称不变。
+- [ ] 名称/位置 trim 后 1–64 字符；空白或超长返回 400。
+- [ ] 空对象 `{}` 返回 400。
+- [ ] 编辑后 `codeOn` / `codeOff` / `rf` / `createdAtEpochMs` 不变。
+- [ ] 未知设备 404；tombstone 内 410。
+- [ ] 编辑不发送 MQTT，不影响正在发送的控制命令。
+- [ ] 其他客户端在下一次 `GET /devices` 看到新名称/位置。
+
+### 18.5 轮询与持久化
 
 - [ ] 学习期间 1s 轮询能完成完整流程。
 - [ ] 轮询返回的旧 learning `revision` 被客户端忽略。
@@ -1866,3 +1933,4 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 | 16 | 候选达标后是否继续采集？ | v1 停止当前槽位采集进入 30s 确认，避免噪声继续污染候选；需要更多候选时用 `rescan` |
 | 17 | 接受开码候选是否要求网关在线？ | 要求；因为下一步必须继续采集关码。接受关码不要求在线 |
 | 18 | 60s 是每个槽位还是整个学习流程？ | 建议每个槽位独立 60s；开/关两段合计最多约 3 分钟（含候选确认），而不是总共 60s |
+| 19 | 编辑设备信息用 `PATCH` 还是 `PUT`？ | `PATCH`：只提交变化的字段，允许单独改名或改位置；不引入 revision 并发控制，后写覆盖先写 |

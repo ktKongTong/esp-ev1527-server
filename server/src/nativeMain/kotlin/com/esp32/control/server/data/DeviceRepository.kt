@@ -31,6 +31,10 @@ class DeviceRepository(db: AppDatabase) {
         devices.insert(device.toEntity())
     }
 
+    suspend fun updateLabels(id: String, name: String, location: String) {
+        devices.updateLabels(id, name, location)
+    }
+
     suspend fun delete(id: String) {
         devices.delete(id)
     }

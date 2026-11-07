@@ -14,6 +14,7 @@ import com.esp32.control.contract.LearningSlot
 import com.esp32.control.contract.LearningTestResult
 import com.esp32.control.contract.StartLearningRequest
 import com.esp32.control.contract.TestLearningRequest
+import com.esp32.control.contract.UpdateDeviceRequest
 import io.ktor.client.HttpClient
 import io.ktor.client.HttpClientConfig
 import io.ktor.client.call.body
@@ -22,6 +23,7 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
+import io.ktor.client.request.patch
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
@@ -81,6 +83,15 @@ class Esp32Api(
             setBody(CommandRequest(action))
         }.ensureSuccess()
     }
+
+    suspend fun updateDevice(
+        deviceId: String,
+        name: String,
+        location: String,
+    ): Device = client.patch("$root/devices/$deviceId") {
+        contentType(ContentType.Application.Json)
+        setBody(UpdateDeviceRequest(name = name, location = location))
+    }.bodyOrThrow()
 
     suspend fun removeDevice(deviceId: String) {
         client.delete("$root/devices/$deviceId").ensureSuccess()

@@ -4,7 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /** Semantic version of this shared contract module. */
-const val CONTRACT_VERSION: String = "2.0.0"
+const val CONTRACT_VERSION: String = "2.1.0"
 
 /** HTTP API version carried in [HealthResponse.apiVersion]. */
 const val API_VERSION: String = "1"
@@ -36,6 +36,16 @@ data class Device(
 data class DeviceListResponse(
     val devices: List<Device>,
     val serverTimeEpochMs: Long,
+)
+
+/**
+ * Partial update for a device. A null field leaves that value unchanged;
+ * codes and RF parameters are immutable after learning.
+ */
+@Serializable
+data class UpdateDeviceRequest(
+    val name: String? = null,
+    val location: String? = null,
 )
 
 @Serializable

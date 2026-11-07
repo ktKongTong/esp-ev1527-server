@@ -65,6 +65,7 @@ func newEchoServer(api *apiServer) *echo.Echo {
 	group.GET("/health", api.health)
 	group.GET("/devices", api.listDevices)
 	group.GET("/devices/:deviceId", api.getDevice)
+	group.PATCH("/devices/:deviceId", api.updateDevice)
 	group.POST("/devices/:deviceId/commands", api.issueCommand)
 	group.DELETE("/devices/:deviceId", api.deleteDevice)
 
@@ -266,6 +267,22 @@ func (s *apiServer) getDevice(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusOK, value)
+}
+
+func (s *apiServer) updateDevice(c echo.Context) error {
+	deviceID := c.Param("deviceId")
+	if deviceID == "" {
+		return invalidDeviceID()
+	}
+	var request updateDeviceRequest
+	if err := c.Bind(&request); err != nil {
+		return err
+	}
+	updated, err := s.devices.update(c.Request().Context(), deviceID, request)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, updated)
 }
 
 func (s *apiServer) issueCommand(c echo.Context) error {

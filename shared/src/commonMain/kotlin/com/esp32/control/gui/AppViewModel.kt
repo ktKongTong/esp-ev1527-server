@@ -45,6 +45,9 @@ internal data class AppUiState(
     val pendingDeviceId: String? = null,
     val error: String? = null,
     val detailDeviceId: String? = null,
+    val editingDeviceId: String? = null,
+    val editBusy: Boolean = false,
+    val editError: String? = null,
     val removalTargetId: String? = null,
     val learningVisible: Boolean = false,
     val learning: LearningSession? = null,
@@ -59,6 +62,9 @@ internal data class AppUiState(
 
     val detailDevice: Device?
         get() = detailDeviceId?.let { id -> devices.firstOrNull { it.id == id } }
+
+    val editingDevice: Device?
+        get() = editingDeviceId?.let { id -> devices.firstOrNull { it.id == id } }
 
     val removalTarget: Device?
         get() = removalTargetId?.let { id -> devices.firstOrNull { it.id == id } }
@@ -112,6 +118,47 @@ internal class AppViewModel(
 
     fun closeDetails() {
         _state.update { it.copy(detailDeviceId = null) }
+    }
+
+    fun openEditor(deviceId: String) {
+        _state.update { it.copy(editingDeviceId = deviceId, editError = null) }
+    }
+
+    fun closeEditor() {
+        if (_state.value.editBusy) return
+        _state.update { it.copy(editingDeviceId = null, editError = null) }
+    }
+
+    fun saveDevice(deviceId: String, name: String, location: String) {
+        if (_state.value.editBusy) return
+        val client = api ?: return
+        _state.update { it.copy(editBusy = true, editError = null) }
+        connectionScope.launch {
+            try {
+                val updated = client.updateDevice(deviceId, name, location)
+                _state.update { current ->
+                    current.copy(
+                        devices = current.devices.map { device ->
+                            if (device.id == updated.id) updated else device
+                        },
+                        editingDeviceId = null,
+                        editBusy = false,
+                        editError = null,
+                        error = null,
+                    )
+                }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
+                    dropDevice(deviceId)
+                    _state.update {
+                        it.copy(editBusy = false, editError = null, error = t.readableMessage())
+                    }
+                } else {
+                    _state.update { it.copy(editBusy = false, editError = t.readableMessage()) }
+                }
+            }
+        }
     }
 
     fun requestRemoval(deviceId: String) {
@@ -376,6 +423,9 @@ internal class AppViewModel(
                 pendingDeviceId = null,
                 error = null,
                 detailDeviceId = null,
+                editingDeviceId = null,
+                editBusy = false,
+                editError = null,
                 removalTargetId = null,
                 learningVisible = false,
                 learning = null,
@@ -493,6 +543,7 @@ internal class AppViewModel(
             current.copy(
                 devices = current.devices.filterNot { it.id == deviceId },
                 detailDeviceId = current.detailDeviceId?.takeUnless { it == deviceId },
+                editingDeviceId = current.editingDeviceId?.takeUnless { it == deviceId },
                 removalTargetId = current.removalTargetId?.takeUnless { it == deviceId },
             )
         }

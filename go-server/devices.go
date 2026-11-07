@@ -43,6 +43,57 @@ func (s *deviceService) get(ctx context.Context, deviceID string) (device, error
 	return device{}, removedOrNotFound(ctx, s.devices, deviceID)
 }
 
+// update edits only the labels. RF codes and parameters stay owned by the
+// learned pair, so editing never touches the code registry.
+func (s *deviceService) update(
+	ctx context.Context,
+	deviceID string,
+	request updateDeviceRequest,
+) (device, error) {
+	if err := requireDeviceID(deviceID); err != nil {
+		return device{}, err
+	}
+	if request.Name == nil && request.Location == nil {
+		return device{}, invalidRequest("name or location is required")
+	}
+	var name, location string
+	if request.Name != nil {
+		value, ok := normalizeDeviceLabel(*request.Name)
+		if !ok {
+			return device{}, invalidRequest("name and location must be 1-64 characters")
+		}
+		name = value
+	}
+	if request.Location != nil {
+		value, ok := normalizeDeviceLabel(*request.Location)
+		if !ok {
+			return device{}, invalidRequest("name and location must be 1-64 characters")
+		}
+		location = value
+	}
+
+	var updated device
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		devices := s.devices.withDB(tx)
+		found, err := devices.find(ctx, deviceID)
+		if err != nil {
+			return err
+		}
+		if found == nil {
+			return removedOrNotFound(ctx, devices, deviceID)
+		}
+		updated = *found
+		if request.Name != nil {
+			updated.Name = name
+		}
+		if request.Location != nil {
+			updated.Location = location
+		}
+		return devices.updateLabels(ctx, deviceID, updated.Name, updated.Location)
+	})
+	return updated, err
+}
+
 // delete removes the device and leaves a tombstone so later reads can return
 // 410. It returns false when the tombstone already exists, which the route
 // still reports as 204.

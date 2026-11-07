@@ -297,6 +297,113 @@ func TestHTTPDeleteDeviceLeavesTombstone(t *testing.T) {
 	}
 }
 
+func TestHTTPUpdateDeviceLabels(t *testing.T) {
+	e, devices, _, _ := newTestAPI(t)
+	original := sampleDevice()
+	if err := devices.insert(t.Context(), original); err != nil {
+		t.Fatalf("insert device: %v", err)
+	}
+	jsonType := echo.MIMEApplicationJSON
+
+	recorder := doRequest(
+		t, e, http.MethodPatch, "/api/v1/devices/dev_test",
+		`{"name":"  new pump  ","location":"north pond"}`, jsonType, nil,
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("patch status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var updated device
+	if err := json.Unmarshal(recorder.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode device: %v", err)
+	}
+	if updated.Name != "new pump" || updated.Location != "north pond" {
+		t.Fatalf("labels = %q/%q", updated.Name, updated.Location)
+	}
+	if updated.CodeOn != original.CodeOn || updated.CodeOff != original.CodeOff ||
+		updated.RF != original.RF {
+		t.Fatalf("patch changed RF data: %+v", updated)
+	}
+
+	recorder = doRequest(
+		t, e, http.MethodPatch, "/api/v1/devices/dev_test",
+		`{"location":"south pond"}`, jsonType, nil,
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("partial patch status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode partial device: %v", err)
+	}
+	if updated.Name != "new pump" || updated.Location != "south pond" {
+		t.Fatalf("partial labels = %q/%q", updated.Name, updated.Location)
+	}
+
+	recorder = doRequest(t, e, http.MethodGet, "/api/v1/devices/dev_test", "", "", nil)
+	var fetched device
+	if err := json.Unmarshal(recorder.Body.Bytes(), &fetched); err != nil {
+		t.Fatalf("decode fetched device: %v", err)
+	}
+	if fetched.Name != updated.Name || fetched.Location != updated.Location {
+		t.Fatalf("persisted labels = %q/%q", fetched.Name, fetched.Location)
+	}
+}
+
+func TestHTTPUpdateDeviceRejectsInvalidInput(t *testing.T) {
+	e, devices, _, _ := newTestAPI(t)
+	if err := devices.insert(t.Context(), sampleDevice()); err != nil {
+		t.Fatalf("insert device: %v", err)
+	}
+	jsonType := echo.MIMEApplicationJSON
+
+	cases := []struct {
+		name   string
+		target string
+		body   string
+		status int
+		code   string
+	}{
+		{"empty body", "/api/v1/devices/dev_test", `{}`, http.StatusBadRequest, "invalid_request"},
+		{"blank name", "/api/v1/devices/dev_test", `{"name":"   "}`, http.StatusBadRequest, "invalid_request"},
+		{"name too long", "/api/v1/devices/dev_test", `{"name":"` + strings.Repeat("a", 65) + `"}`, http.StatusBadRequest, "invalid_request"},
+		{"unknown device", "/api/v1/devices/dev_missing", `{"name":"pump"}`, http.StatusNotFound, "device_not_found"},
+		{"invalid id", "/api/v1/devices/bad%20id", `{"name":"pump"}`, http.StatusBadRequest, "invalid_device_id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := doRequest(t, e, http.MethodPatch, tc.target, tc.body, jsonType, nil)
+			if recorder.Code != tc.status {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+			envelope := decodeErrorEnvelope(t, recorder)
+			if envelope.Error.Code != tc.code {
+				t.Fatalf("code = %q, want %q", envelope.Error.Code, tc.code)
+			}
+		})
+	}
+}
+
+func TestHTTPUpdateRemovedDeviceReturnsGone(t *testing.T) {
+	e, devices, _, _ := newTestAPI(t)
+	if err := devices.insert(t.Context(), sampleDevice()); err != nil {
+		t.Fatalf("insert device: %v", err)
+	}
+	recorder := doRequest(t, e, http.MethodDelete, "/api/v1/devices/dev_test", "", "", nil)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d", recorder.Code)
+	}
+	recorder = doRequest(
+		t, e, http.MethodPatch, "/api/v1/devices/dev_test",
+		`{"name":"pump"}`, echo.MIMEApplicationJSON, nil,
+	)
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("patch status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	envelope := decodeErrorEnvelope(t, recorder)
+	if envelope.Error.Code != "device_removed" {
+		t.Fatalf("code = %q", envelope.Error.Code)
+	}
+}
+
 func TestHTTPCORS(t *testing.T) {
 	e, _, _, _ := newTestAPI(t)
 	recorder := doRequest(t, e, http.MethodOptions, "/api/v1/devices", "", "", map[string]string{

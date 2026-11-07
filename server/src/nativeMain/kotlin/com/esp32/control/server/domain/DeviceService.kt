@@ -3,10 +3,12 @@ package com.esp32.control.server.domain
 import androidx.room3.withWriteTransaction
 import com.esp32.control.contract.Device
 import com.esp32.control.contract.DeviceListResponse
+import com.esp32.control.contract.UpdateDeviceRequest
 import com.esp32.control.server.data.DeviceRepository
 import com.esp32.control.server.db.AppDatabase
 import com.esp32.control.server.deviceNotFound
 import com.esp32.control.server.deviceRemoved
+import com.esp32.control.server.invalidRequest
 import com.esp32.control.server.nowEpochMs
 import com.esp32.control.server.requireDeviceId
 
@@ -24,6 +26,38 @@ class DeviceService(
         devices.find(deviceId)?.let { return it }
         devices.findTombstone(deviceId)?.let { throw deviceRemoved(it) }
         throw deviceNotFound()
+    }
+
+    /**
+     * Updates the editable labels only. RF codes and parameters stay owned by
+     * the learned pair, so editing never touches the code registry.
+     */
+    suspend fun update(deviceId: String, request: UpdateDeviceRequest): Device {
+        requireDeviceId(deviceId)
+        if (request.name == null && request.location == null) {
+            throw invalidRequest("name or location is required")
+        }
+        val requestedName = request.name?.let { normalizeDeviceLabel(it) }
+        val requestedLocation = request.location?.let { normalizeDeviceLabel(it) }
+        if ((request.name != null && requestedName == null) ||
+            (request.location != null && requestedLocation == null)
+        ) {
+            throw invalidRequest("name and location must be 1-64 characters")
+        }
+
+        return db.withWriteTransaction {
+            val current = devices.find(deviceId)
+            if (current == null) {
+                devices.findTombstone(deviceId)?.let { throw deviceRemoved(it) }
+                throw deviceNotFound()
+            }
+            val updated = current.copy(
+                name = requestedName ?: current.name,
+                location = requestedLocation ?: current.location,
+            )
+            devices.updateLabels(updated.id, updated.name, updated.location)
+            updated
+        }
     }
 
     /**

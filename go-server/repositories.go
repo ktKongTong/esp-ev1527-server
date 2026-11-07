@@ -105,6 +105,16 @@ func (r *deviceRepository) insert(ctx context.Context, value device) error {
 	}).Error
 }
 
+func (r *deviceRepository) updateLabels(
+	ctx context.Context,
+	id, name, location string,
+) error {
+	return r.db.WithContext(ctx).
+		Model(&deviceRow{}).
+		Where("id = ?", id).
+		Updates(map[string]any{"name": name, "location": location}).Error
+}
+
 func (r *deviceRepository) delete(ctx context.Context, id string) error {
 	return r.db.WithContext(ctx).Where("id = ?", id).Delete(&deviceRow{}).Error
 }

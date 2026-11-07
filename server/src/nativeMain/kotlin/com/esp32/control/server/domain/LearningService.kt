@@ -18,6 +18,7 @@ import com.esp32.control.server.Log
 import com.esp32.control.server.data.DeviceRepository
 import com.esp32.control.server.db.AppDatabase
 import com.esp32.control.server.deviceRemoved
+import com.esp32.control.server.invalidRequest
 import com.esp32.control.server.learningNotFound
 import com.esp32.control.server.mqtt.GatewayStatusStore
 import com.esp32.control.server.mqtt.RfCapture
@@ -391,9 +392,9 @@ class LearningService(
             )
         }
 
-        val name = request.name.trim()
-        val location = request.location.trim()
-        if (name.isEmpty() || name.length > 64 || location.isEmpty() || location.length > 64) {
+        val name = normalizeDeviceLabel(request.name)
+        val location = normalizeDeviceLabel(request.location)
+        if (name == null || location == null) {
             Log.warn { "[learning] confirm ${session.id} rejected: invalid name or location" }
             throw invalidRequest("name and location must be 1-64 characters")
         }
@@ -780,9 +781,6 @@ class LearningService(
 
     private fun unavailable(code: String, message: String): ApiException =
         ApiException(HttpStatusCode.ServiceUnavailable, code, message)
-
-    private fun invalidRequest(message: String): ApiException =
-        ApiException(HttpStatusCode.BadRequest, "invalid_request", message)
 
     private fun codePairInvalid(reason: String): ApiException = ApiException(
         HttpStatusCode.UnprocessableEntity,

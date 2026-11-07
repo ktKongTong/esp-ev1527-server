@@ -1,6 +1,7 @@
 package com.esp32.control.server.routes
 
 import com.esp32.control.contract.CommandRequest
+import com.esp32.control.contract.UpdateDeviceRequest
 import com.esp32.control.server.ApiException
 import com.esp32.control.server.domain.CommandService
 import com.esp32.control.server.domain.DeviceService
@@ -13,6 +14,7 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
+import io.ktor.server.routing.patch
 import io.ktor.server.routing.post
 
 fun Route.deviceRoute(devices: DeviceService, commands: CommandService) {
@@ -23,6 +25,12 @@ fun Route.deviceRoute(devices: DeviceService, commands: CommandService) {
     get("/devices/{deviceId}") {
         val deviceId = call.parameters["deviceId"] ?: throw invalidDeviceId()
         call.respond(devices.get(deviceId))
+    }
+
+    patch("/devices/{deviceId}") {
+        val deviceId = call.parameters["deviceId"] ?: throw invalidDeviceId()
+        val request = call.receive<UpdateDeviceRequest>()
+        call.respond(devices.update(deviceId, request))
     }
 
     post("/devices/{deviceId}/commands") {

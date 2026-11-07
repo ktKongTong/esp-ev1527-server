@@ -33,3 +33,6 @@ fun deviceNotFound(): ApiException =
 
 fun learningNotFound(): ApiException =
     ApiException(HttpStatusCode.NotFound, "learning_session_not_found", "Learning session not found")
+
+fun invalidRequest(message: String): ApiException =
+    ApiException(HttpStatusCode.BadRequest, "invalid_request", message)

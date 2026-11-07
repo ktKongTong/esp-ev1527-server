@@ -75,3 +75,12 @@ func codePairInvalid(reason string) *apiError {
 func runeLength(value string) int {
 	return len([]rune(strings.TrimSpace(value)))
 }
+
+// normalizeDeviceLabel trims a name or location and reports whether the
+// result is 1-64 characters. Learning confirmation and device editing share
+// this rule so the two paths cannot drift.
+func normalizeDeviceLabel(value string) (string, bool) {
+	trimmed := strings.TrimSpace(value)
+	length := runeLength(trimmed)
+	return trimmed, length >= 1 && length <= 64
+}

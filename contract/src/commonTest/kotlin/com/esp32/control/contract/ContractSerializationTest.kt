@@ -56,6 +56,20 @@ class ContractSerializationTest {
     }
 
     @Test
+    fun updateDeviceRequestKeepsOmittedFieldsNull() {
+        val request = ContractJson.decodeFromString<UpdateDeviceRequest>(
+            """{"name":"2 号增氧机"}""",
+        )
+
+        assertEquals("2 号增氧机", request.name)
+        assertEquals(null, request.location)
+
+        val encoded = ContractJson.encodeToString(UpdateDeviceRequest(name = "2 号增氧机"))
+        assertTrue(encoded.contains("\"name\":\"2 号增氧机\""), encoded)
+        assertTrue(encoded.contains("\"location\":null"), encoded)
+    }
+
+    @Test
     fun commandRequestAcceptsSnakeCaseActions() {
         val on = ContractJson.decodeFromString<CommandRequest>("""{"action":"turn_on"}""")
         val off = ContractJson.decodeFromString<CommandRequest>("""{"action":"turn_off"}""")

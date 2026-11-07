@@ -11,18 +11,25 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
@@ -40,6 +47,7 @@ internal fun DeviceDetailSheet(
     gatewayOnline: Boolean,
     errorText: String?,
     onCommand: (CommandAction) -> Unit,
+    onEdit: () -> Unit,
     onRemove: () -> Unit,
     onDismissError: () -> Unit,
     onClose: () -> Unit,
@@ -75,6 +83,9 @@ internal fun DeviceDetailSheet(
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+                TextButton(onClick = onEdit, enabled = !pending) {
+                    Text("编辑")
                 }
                 FilledTonalIconButton(
                     onClick = onClose,
@@ -162,6 +173,82 @@ internal fun DeviceDetailSheet(
             }
         }
     }
+}
+
+@Composable
+internal fun DeviceEditDialog(
+    device: Device,
+    busy: Boolean,
+    errorText: String?,
+    onSave: (String, String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var name by remember(device.id) { mutableStateOf(device.name) }
+    var location by remember(device.id) { mutableStateOf(device.location) }
+
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        shape = AppShapes.Dialog,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        title = { Text("编辑遥控器") },
+        text = {
+            Column {
+                Text(
+                    text = "开码与关码保持不变。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.take(64) },
+                    label = { Text("名称") },
+                    singleLine = true,
+                    shape = AppShapes.Field,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = location,
+                    onValueChange = { location = it.take(64) },
+                    label = { Text("位置") },
+                    singleLine = true,
+                    shape = AppShapes.Field,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                errorText?.let {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        text = it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(name.trim(), location.trim()) },
+                enabled = !busy && name.isNotBlank() && location.isNotBlank(),
+                shape = CircleShape,
+            ) {
+                if (busy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                    )
+                } else {
+                    Text("保存")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !busy) {
+                Text("取消")
+            }
+        },
+    )
 }
 
 @Composable
