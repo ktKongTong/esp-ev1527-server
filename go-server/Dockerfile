@@ -42,6 +42,10 @@ COPY --from=build /out/esp32-control-server /usr/local/bin/esp32-control-server
 USER app
 WORKDIR /data
 
+# Persist the SQLite database across container restarts. A named volume or
+# bind mount can override this path.
+VOLUME ["/data"]
+
 # MQTT_HOST has no default and must be supplied at runtime. DATABASE_PATH
 # points at the writable volume.
 ENV SERVER_HOST=0.0.0.0 \

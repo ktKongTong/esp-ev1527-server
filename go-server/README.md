@@ -87,15 +87,24 @@ CGO_ENABLED=1 go test ./...
 
 ```bash
 docker pull ghcr.io/ktkongtong/esp-ev1527-server:go-server
-docker run --rm -p 8080:8080 \
+docker run -d --name esp32-control-go \
+  -p 8080:8080 \
   -e MQTT_HOST=broker.example.com \
-  -v "$PWD/data:/data" \
+  -v esp32-control-go-data:/data \
   ghcr.io/ktkongtong/esp-ev1527-server:go-server
 ```
 
 `linux/amd64` 与 `linux/arm64` 多架构构建。SQLite 驱动需要 CGO，因此 arm64
 阶段在 buildx/QEMU 下原生编译。数据库默认写入 `/data/esp32-control.db`，
 容器以 uid 10001 的非 root 用户运行。
+
+镜像声明了 `VOLUME ["/data"]`。使用命名卷（如上例）无需处理权限；使用 bind
+mount 时，需要先确保宿主目录对 uid 10001 可写：
+
+```bash
+mkdir -p data
+sudo chown 10001:10001 data
+```
 
 本地构建（在仓库根目录执行）：
 
