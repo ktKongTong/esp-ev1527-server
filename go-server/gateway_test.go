@@ -40,9 +40,9 @@ func TestParseCapture(t *testing.T) {
 			absent: true,
 		},
 		{
-			name:   "wrong protocol",
-			text:   `{"value":1714739,"protocol":22,"length":24}`,
-			absent: true,
+			name: "other protocol allowed",
+			text: `{"value":1714739,"protocol":22,"length":24}`,
+			want: &rfCapture{Value: 1714739, Protocol: 22, Length: 24, DelayMs: 330},
 		},
 		{
 			name:   "wrong length",
@@ -113,13 +113,22 @@ func TestGatewayIngestTransitions(t *testing.T) {
 		t.Fatal("lastCaptureAtEpochMs must be set")
 	}
 
-	// A frame that fails EV1527 gating must not reach the receiver counter.
+	// The protocol number is gateway metadata, so a different value still counts.
 	ingest.onMessage(
 		"home/OpenMQTTGateway/315_433/Pulses",
 		[]byte(`{"value":1714739,"protocol":22,"length":24}`),
 	)
-	if snapshot = gateway.snapshot(); snapshot.Receiver.CaptureCount != 1 {
-		t.Fatalf("capture count = %d, want 1", snapshot.Receiver.CaptureCount)
+	if snapshot = gateway.snapshot(); snapshot.Receiver.CaptureCount != 2 {
+		t.Fatalf("capture count = %d, want 2", snapshot.Receiver.CaptureCount)
+	}
+
+	// A frame with the wrong length must not reach the receiver counter.
+	ingest.onMessage(
+		"home/OpenMQTTGateway/315_433/Pulses",
+		[]byte(`{"value":1714739,"protocol":1,"length":23}`),
+	)
+	if snapshot = gateway.snapshot(); snapshot.Receiver.CaptureCount != 2 {
+		t.Fatalf("capture count = %d, want 2", snapshot.Receiver.CaptureCount)
 	}
 
 	// Command echoes and topics outside the prefix are ignored.
@@ -131,8 +140,8 @@ func TestGatewayIngestTransitions(t *testing.T) {
 		"other/prefix/Pulses",
 		[]byte(`{"value":1714739,"protocol":1,"length":24}`),
 	)
-	if snapshot = gateway.snapshot(); snapshot.Receiver.CaptureCount != 1 {
-		t.Fatalf("capture count = %d, want 1", snapshot.Receiver.CaptureCount)
+	if snapshot = gateway.snapshot(); snapshot.Receiver.CaptureCount != 2 {
+		t.Fatalf("capture count = %d, want 2", snapshot.Receiver.CaptureCount)
 	}
 
 	ingest.onMessage("home/OpenMQTTGateway/LWT", []byte(`"offline"`))

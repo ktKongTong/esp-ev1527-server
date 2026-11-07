@@ -163,7 +163,7 @@ class LearningService(
                 )
             }
 
-            devices.findOwner(candidate.protocol, candidate.length, candidate.value)?.let { owner ->
+            devices.findOwner(candidate.length, candidate.value)?.let { owner ->
                 Log.warn {
                     "[learning] accept ${candidate.id} rejected: code ${candidate.value} " +
                         "owned by $owner"
@@ -427,7 +427,7 @@ class LearningService(
 
         val device = db.withWriteTransaction {
             for (code in listOf(on, off)) {
-                devices.findOwner(code.protocol, code.length, code.value)?.let { owner ->
+                devices.findOwner(code.length, code.value)?.let { owner ->
                     throw ApiException(
                         HttpStatusCode.Conflict,
                         "code_already_registered",
@@ -574,11 +574,7 @@ class LearningService(
                 }
                 return@withLock
             }
-            val conflict = devices.findOwner(
-                capture.protocol,
-                capture.length,
-                capture.value,
-            )
+            val conflict = devices.findOwner(capture.length, capture.value)
             val updatedCandidate = if (existing == null) {
                 LearningCandidate(
                     id = newId("cand"),

@@ -1,19 +1,19 @@
 package main
 
 // EV1527 frames are fixed at 24 bits: a 20-bit address plus a 4-bit key.
-// Frames that do not match this shape are dropped at ingest instead of being
-// normalized, because a weak frame decoded under the wrong timing template
-// still looks like a valid 24-bit code.
+// The gateway reports a protocol number from whichever decoder template
+// matched the frame; that number is metadata, not part of the code, so it is
+// preserved but never used for gating. Only the frame length identifies the
+// EV1527 shape.
 const (
-	ev1527Protocol = 1
 	ev1527Length   = 24
 	ev1527KeyBits  = 4
 	ev1527MaxValue = (1 << ev1527Length) - 1
 	ev1527KeyMask  = (1 << ev1527KeyBits) - 1
 )
 
-func ev1527Matches(protocol, length int) bool {
-	return protocol == ev1527Protocol && length == ev1527Length
+func ev1527AcceptsLength(length int) bool {
+	return length == ev1527Length
 }
 
 func ev1527Valid(value int64) bool {

@@ -66,17 +66,20 @@ func (r *deviceRepository) findTombstone(ctx context.Context, deviceID string) (
 	return &deviceTombstone{DeviceID: row.DeviceID, RemovedAtEpochMs: row.RemovedAtEpochMs}, nil
 }
 
+// findOwner matches on length and code value only. The gateway may report a
+// different protocol number for the same physical code, so protocol must not
+// split code identity.
 func (r *deviceRepository) findOwner(
 	ctx context.Context,
-	protocol, length int,
+	length int,
 	value int64,
 ) (string, error) {
 	var row deviceRow
 	err := r.db.WithContext(ctx).
 		Select("id").
 		Where(
-			"rfProtocol = ? AND rfLength = ? AND (codeOn = ? OR codeOff = ?)",
-			protocol, length, value, value,
+			"rfLength = ? AND (codeOn = ? OR codeOff = ?)",
+			length, value, value,
 		).
 		Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {

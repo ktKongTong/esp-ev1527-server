@@ -24,8 +24,8 @@ class DeviceRepository(db: AppDatabase) {
             )
         }
 
-    suspend fun findOwner(protocol: Int, length: Int, value: Long): String? =
-        devices.findOwner(protocol, length, value)
+    suspend fun findOwner(length: Int, value: Long): String? =
+        devices.findOwner(length, value)
 
     suspend fun insert(device: Device) {
         devices.insert(device.toEntity())

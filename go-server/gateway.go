@@ -202,10 +202,10 @@ func parseCapture(topic, text string) *rfCapture {
 		debugf("[ingest] drop %s: capture payload is missing value/protocol/length", topic)
 		return nil
 	}
-	if !ev1527Matches(*payload.Protocol, *payload.Length) {
+	if !ev1527AcceptsLength(*payload.Length) {
 		debugf(
-			"[ingest] drop %s: protocol=%d length=%d, EV1527 expects %d/%d",
-			topic, *payload.Protocol, *payload.Length, ev1527Protocol, ev1527Length,
+			"[ingest] drop %s: length=%d, EV1527 expects %d bits",
+			topic, *payload.Length, ev1527Length,
 		)
 		return nil
 	}

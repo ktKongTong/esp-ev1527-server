@@ -79,10 +79,10 @@ class GatewayIngest(
             }
             return null
         }
-        if (!Ev1527.matches(payload.protocol, payload.length)) {
+        if (!Ev1527.acceptsLength(payload.length)) {
             Log.debug {
-                "[ingest] drop $topic: protocol=${payload.protocol} length=${payload.length}, " +
-                    "EV1527 expects ${Ev1527.PROTOCOL}/${Ev1527.LENGTH}"
+                "[ingest] drop $topic: length=${payload.length}, " +
+                    "EV1527 expects ${Ev1527.LENGTH} bits"
             }
             return null
         }

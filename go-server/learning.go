@@ -202,7 +202,7 @@ func (s *learningService) acceptCandidate(
 		)
 	}
 
-	owner, err := s.devices.findOwner(ctx, candidate.Protocol, candidate.Length, candidate.Value)
+	owner, err := s.devices.findOwner(ctx, candidate.Length, candidate.Value)
 	if err != nil {
 		return learningSession{}, err
 	}
@@ -502,7 +502,7 @@ func (s *learningService) confirmLearning(
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		devices := s.devices.withDB(tx)
 		for _, code := range []learningCandidate{*on, *off} {
-			owner, err := devices.findOwner(ctx, code.Protocol, code.Length, code.Value)
+			owner, err := devices.findOwner(ctx, code.Length, code.Value)
 			if err != nil {
 				return err
 			}
@@ -659,7 +659,7 @@ func (s *learningService) onCapture(ctx context.Context, capture rfCapture, now 
 		return
 	}
 
-	owner, err := s.devices.findOwner(ctx, capture.Protocol, capture.Length, capture.Value)
+	owner, err := s.devices.findOwner(ctx, capture.Length, capture.Value)
 	if err != nil {
 		errorf("[learning] capture %d owner lookup failed: %v", capture.Value, err)
 		return

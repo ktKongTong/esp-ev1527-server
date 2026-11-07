@@ -11,11 +11,10 @@ class Ev1527Test {
     private val keyOff = 196004L
 
     @Test
-    fun acceptsOnlyProtocol1And24Bits() {
-        assertTrue(Ev1527.matches(Ev1527.PROTOCOL, Ev1527.LENGTH))
-        assertFalse(Ev1527.matches(6, Ev1527.LENGTH))
-        assertFalse(Ev1527.matches(Ev1527.PROTOCOL, 21))
-        assertFalse(Ev1527.matches(Ev1527.PROTOCOL, 25))
+    fun acceptsOnly24BitFrames() {
+        assertTrue(Ev1527.acceptsLength(Ev1527.LENGTH))
+        assertFalse(Ev1527.acceptsLength(21))
+        assertFalse(Ev1527.acceptsLength(25))
     }
 
     @Test
@@ -34,8 +33,9 @@ class Ev1527Test {
 
     @Test
     fun decoderArtifactsAreNumericallyValid() {
-        // Field-log artifacts: all are below 2^24, so only the protocol/length
-        // gate rejects them.
+        // Field-log artifacts: the truncated frames fail the length gate.
+        // `392004` (196002 * 2, reported protocol 6) is still a 24-bit frame,
+        // and protocol is not a gate.
         assertTrue(Ev1527.isValid(24500)) // 196002 >> 3, reported length 21
         assertTrue(Ev1527.isValid(382)) // 196002 >> 9, reported length 15
         assertTrue(Ev1527.isValid(5)) // 196002 >> 15, reported length 9

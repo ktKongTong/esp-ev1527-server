@@ -76,9 +76,9 @@
   它不保存设备名称、设备 ID 或学习会话，但它的 **315MHz 接收器是学习的唯一信号来源**：
   接收器收到遥控器信号后，解码为 `value/protocol/length/delay` 并发布到
   `315toMQTT`。服务端不能凭空生成或“推断”一个 RF 码。
-  本项目只支持 EV1527：只接受 `protocol=1 && length=24` 的捕获；其余帧
-  （截断前缀、被其他协议模板误拟合的帧）在 `GatewayIngest` 直接丢弃，
-  不进入学习会话，也不计入 `receiver` 证据。
+  本项目只支持 EV1527：只接受 `length=24` 的捕获；`protocol` 是网关解码模板
+  的元数据，原样保留但不参与过滤。长度不是 24 的帧（例如截断前缀）在
+  `GatewayIngest` 直接丢弃，不进入学习会话，也不计入 `receiver` 证据。
 - **Remote**：315MHz 遥控器/按钮，一个按键对应一个 RF 码；物理链路单向。
 - **Server**：唯一拥有设备注册表、开/关码归属、幂等去重和学习会话的服务端；
   它编排采集/候选确认窗口，但必须等待网关捕获。
@@ -89,10 +89,10 @@
 
 | 术语 | 含义 |
 | --- | --- |
-| RF 码 | EV1527 24-bit 码，线上表示为 `(protocol, length, value)`；本项目固定 `(1, 24, value)` |
+| RF 码 | EV1527 24-bit 码，线上表示为 `(protocol, length, value)`；`length` 固定 `24`，`protocol` 保存网关上报值但不参与过滤 |
 | 开码 / 关码 | 一个逻辑设备绑定的两个 RF 码；分别用于 `turn_on` / `turn_off` |
 | 捕获 | 网关的 315MHz 接收器从空中收到并解码的 RF 码，经 `315toMQTT` 上报 |
-| 候选码 | 学习会话中按 `value` 聚合的 EV1527 码；入站已保证 `protocol=1`、`length=24`；达到按键次数阈值后才可被接受，仍需客户端确认语义 |
+| 候选码 | 学习会话中按 `value` 聚合的 EV1527 码；入站已保证 `length=24`，`protocol` 仅作元数据；达到按键次数阈值后才可被接受，仍需客户端确认语义 |
 | 按键次数 | 同一候选码被独立按下（而不是同一按键产生的重复帧）的次数 |
 | 采集窗口 | 服务端为当前槽位打开的 60 秒关联窗口；窗口内到达的网关捕获才计入 |
 | 候选确认窗口 | 候选码达到阈值后，等待客户端确认的 30 秒窗口 |
@@ -593,8 +593,8 @@ stateDiagram-v2
   - 同一码、帧间隔 ≤400ms 的连续帧归为同一次按键，`frameCount++`，`hitCount` 不变；
   - 与上一次同码的间隔 ≥600ms 才开始新的一次按键，`hitCount++`；
   - 间隔在 400–600ms 之间按“同一次按键”处理（保守计数，避免把重复帧误算成按键）。
-- 入站只接受 `protocol=1 && length=24` 的 EV1527 帧；候选按 `value` 精确聚类，
-  不做模糊匹配。
+- 入站只接受 `length=24` 的 EV1527 帧；`protocol` 不参与门控，候选按 `value`
+  精确聚类，不做模糊匹配。
 - 一个槽位内可能有多个候选。达到阈值的候选可被选择；未达阈值的候选只展示计数，
   不可接受。第一个候选达标时停止采集，因此后续按键不再进入本槽位。
 - 候选码如果已被 `active` 设备占用，仍会展示并带 `conflictDeviceId`，
@@ -663,7 +663,7 @@ data class RfParameters(
 | 字段 | 说明 |
 | --- | --- |
 | `codeOn` / `codeOff` | RF 码值，非负；当前 315M/24bit 范围 `0..16777215` |
-| `rf.protocol` / `rf.length` | EV1527 固定为 `1` / `24`；同对开/关码必须来自同一 20-bit address |
+| `rf.protocol` / `rf.length` | `rf.length` 固定为 `24`；`rf.protocol` 保存开码捕获时网关上报的值，仅作元数据；同对开/关码必须来自同一 20-bit address |
 | `rf.repeat` | 发射重复次数，默认 5 |
 | `createdAtEpochMs` | 学习确认时间 |
 
@@ -1138,13 +1138,14 @@ OMG 315 没有标准的“开始学习”指令，服务端无法远程打开一
    **不接受客户端直接 POST 一个 RF 码**，也不提供“手动填码”接口。
 2. **解析**：`value: Long`, `protocol: Int`, `length: Int`, `delayMs: Int`；
    非法/缺失字段丢弃并记录日志。
-3. **EV1527 门控**：只接受 `protocol == 1 && length == 24` 且
-   `value in 0..16777215` 的帧；其他协议、截断前缀和误拟合帧一律丢弃。
+3. **EV1527 门控**：只接受 `length == 24` 且 `value in 0..16777215` 的帧；
+   `protocol` 是网关解码模板的元数据，原样保留但不参与过滤。长度不是 24 的
+   截断帧一律丢弃。
 4. **接收器证据**：合法捕获会把 `receiver.state` 置为 `receiving`，
    更新 `lastCaptureAtEpochMs`、`captureCount`；即使当前没有学习会话也更新。
-5. **候选键**：门控后 `protocol`/`length` 恒定，`value` 相同的帧归入同一个候选；
-   不做模糊匹配、不按 `delayMs` 分组。不同遥控器若发出完全相同的码，
-   服务端无法区分，会视为同一个候选。
+5. **候选键**：门控后 `length` 恒为 24，`value` 相同的帧归入同一个候选；
+   `protocol` 不参与聚类。不做模糊匹配、不按 `delayMs` 分组。不同遥控器若发出
+   完全相同的码，服务端无法区分，会视为同一个候选。
 6. **按键分组**（关键规则，按候选独立计算）：
    - 每个候选维护自己的 `lastFrameAt`；其他候选的帧不更新它。
    - 同候选、与**该候选上一帧**间隔 ≤400ms → 同一帧组，`frameCount++`，
@@ -1293,8 +1294,9 @@ OMG 315 没有标准的“开始学习”指令，服务端无法远程打开一
 ### 8.7 学习完成后的数据变化
 
 - 设备注册表新增一条记录（无状态字段）。
-- 码归属索引新增两条：`(protocol,length,codeOn)` 和 `(protocol,length,codeOff)`；
-  来源分别是 `acceptedOnCandidateId` / `acceptedOffCandidateId` 对应的候选码。
+- 码归属索引新增两条：`(length,codeOn)` 和 `(length,codeOff)`；
+  `protocol` 是解码元数据，不参与归属判断。来源分别是
+  `acceptedOnCandidateId` / `acceptedOffCandidateId` 对应的候选码。
 - 设备列表新增该设备（`confirm` 响应 + 后续轮询）。
 - 学习会话从活动锁中移除，进入终态保留（仅内存，重启即丢失）。
 - 后续控制该设备时，`turn_on` 使用 `codeOn`，`turn_off` 使用 `codeOff`。
@@ -1456,8 +1458,8 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - 409 `learning_busy`（`details.activeSessionId`）
 - 事件 `learning.updated`
 - 注意：本接口**不会**向网关发送“开始学习”命令；它只打开服务端采集窗口，
-  等待网关的 `315toMQTT` 捕获。只接受 EV1527 帧（`protocol=1`、
-  `length=24`），并按 `value` 聚类，
+  等待网关的 `315toMQTT` 捕获。只接受 EV1527 帧（`length=24`；
+  `protocol` 不参与门控），并按 `value` 聚类，
   同一码独立按 3 次后进入 `candidate_on_ready`。
 
 ### 11.7 `GET /api/v1/learning/sessions/{sessionId}`

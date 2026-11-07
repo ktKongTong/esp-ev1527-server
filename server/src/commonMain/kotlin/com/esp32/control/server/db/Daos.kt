@@ -15,16 +15,18 @@ interface DeviceDao {
 
     /**
      * Returns the device that already owns this RF code in either slot.
+     * The gateway may report different protocol numbers for the same physical
+     * code, so code identity uses length and value only.
      */
     @Query(
         """
         SELECT id FROM devices
-        WHERE rfProtocol = :protocol AND rfLength = :length
+        WHERE rfLength = :length
           AND (codeOn = :value OR codeOff = :value)
         LIMIT 1
         """,
     )
-    suspend fun findOwner(protocol: Int, length: Int, value: Long): String?
+    suspend fun findOwner(length: Int, value: Long): String?
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(device: DeviceEntity)
