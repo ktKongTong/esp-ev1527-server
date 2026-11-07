@@ -225,18 +225,18 @@ docker run --rm --name esp32-server \
 
 #### 在 GitHub Actions 中发布
 
-`.github/workflows/go-server-image.yml` 在 `go-server/**` 变更、手动触发时，
+`.github/workflows/server-image.yml` 在 `go-server/**` 变更、手动触发时，
 用同一份 Dockerfile 构建 `linux/amd64` + `linux/arm64` 镜像并推送到
 GitHub Container Registry：
 
 ```
-ghcr.io/ktkongtong/esp-ev1527-server:go-server
-ghcr.io/ktkongtong/esp-ev1527-server:go-server-<version>
+ghcr.io/ktkongtong/esp-ev1527-server:latest
+ghcr.io/ktkongtong/esp-ev1527-server:<version>
 ```
 
-PR 只构建、不推送。`go-server-<version>` 与 `/api/v1/health` 的 `version`
-一致。工作流使用内置 `GITHUB_TOKEN` 登录 GHCR，不需要额外的 GitHub Packages
-凭据。
+PR 只构建、不推送。`<version>` 与 `/api/v1/health` 的 `version` 一致；
+`latest` 只在默认分支（`main`）更新。工作流使用内置 `GITHUB_TOKEN` 登录
+GHCR，不需要额外的 GitHub Packages 凭据。
 
 ### 3. 启动 Web 端
 

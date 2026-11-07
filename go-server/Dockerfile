@@ -6,7 +6,7 @@
 #   docker buildx build \
 #     --platform linux/amd64,linux/arm64 \
 #     -f go-server/Dockerfile \
-#     -t ghcr.io/ktkongtong/esp-ev1527-server:go-server --push .
+#     -t ghcr.io/ktkongtong/esp-ev1527-server:latest --push .
 #
 # The GORM sqlite dialector imports mattn/go-sqlite3, which requires CGO even
 # though production connects to Turso through the pure-Go serverless driver.

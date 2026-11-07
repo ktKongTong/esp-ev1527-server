@@ -102,13 +102,13 @@ CGO_ENABLED=1 go test ./...
 镜像发布到 GitHub Container Registry：
 
 ```bash
-docker pull ghcr.io/ktkongtong/esp-ev1527-server:go-server
+docker pull ghcr.io/ktkongtong/esp-ev1527-server:latest
 docker run -d --name esp32-control-go \
   -p 8080:8080 \
   -e MQTT_HOST=broker.example.com \
   -e TURSO_DATABASE_URL='libsql://<db>-<org>.turso.io' \
   -e TURSO_AUTH_TOKEN='<token>' \
-  ghcr.io/ktkongtong/esp-ev1527-server:go-server
+  ghcr.io/ktkongtong/esp-ev1527-server:latest
 ```
 
 `linux/amd64` 与 `linux/arm64` 多架构构建。GORM 的 sqlite dialector 导入
@@ -117,9 +117,9 @@ docker run -d --name esp32-control-go \
 
 每次构建推送两个 tag：
 
-- `go-server`：跟随 `main` 的浮动 tag。
-- `go-server-<version>`：固定到 `go-server/contract.go` 中的 `serverVersion`，
-  与 `/api/v1/health` 返回的 `version` 一致，例如 `go-server-0.2.0`。
+- `latest`：跟随 `main` 的浮动 tag。
+- `<version>`：固定到 `go-server/contract.go` 中的 `serverVersion`，
+  与 `/api/v1/health` 返回的 `version` 一致，例如 `0.2.0`。
   生产部署建议使用该 tag。
 
 本地构建（在仓库根目录执行）：
@@ -128,11 +128,11 @@ docker run -d --name esp32-control-go \
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
   -f go-server/Dockerfile \
-  -t ghcr.io/ktkongtong/esp-ev1527-server:go-server --push .
+  -t ghcr.io/ktkongtong/esp-ev1527-server:latest --push .
 ```
 
-GitHub Actions 工作流：`.github/workflows/go-server-image.yml`。`main` 分支的
-`go-server/**` 变更会构建并推送 `go-server` 与 `go-server-<version>` 两个 tag；
+GitHub Actions 工作流：`.github/workflows/server-image.yml`。`main` 分支的
+`go-server/**` 变更会构建并推送 `latest` 与 `<version>` 两个 tag；
 Pull Request 只构建不推送。
 
 ## HTTP 接口

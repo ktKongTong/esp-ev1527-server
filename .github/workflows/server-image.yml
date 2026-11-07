@@ -1,15 +1,15 @@
-name: Go server image
+name: Server image
 
 on:
   push:
     branches: [main]
     paths:
-      - ".github/workflows/go-server-image.yml"
+      - ".github/workflows/server-image.yml"
       - ".dockerignore"
       - "go-server/**"
   pull_request:
     paths:
-      - ".github/workflows/go-server-image.yml"
+      - ".github/workflows/server-image.yml"
       - ".dockerignore"
       - "go-server/**"
   workflow_dispatch:
@@ -19,20 +19,19 @@ permissions:
   packages: write
 
 concurrency:
-  group: go-server-image-${{ github.workflow }}-${{ github.ref }}
+  group: server-image-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   image:
-    name: Build and publish go-server image
+    name: Build and publish server image
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # GHCR requires a lowercase repository path. The image uses the
-      # go-server tags.
+      # GHCR requires a lowercase repository path.
       - name: Set image name
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
@@ -69,8 +68,8 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=go-server
-            type=raw,value=go-server-${{ env.VERSION }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ env.VERSION }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -81,5 +80,5 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=go-server
-          cache-to: type=gha,mode=max,scope=go-server
+          cache-from: type=gha,scope=server-image
+          cache-to: type=gha,mode=max,scope=server-image
