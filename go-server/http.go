@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net"
@@ -23,7 +24,7 @@ type apiServer struct {
 	startedAtEpochMs int64
 }
 
-func newEchoServer(api *apiServer) *echo.Echo {
+func newEchoServer(api *apiServer, auth authConfig) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
@@ -38,6 +39,7 @@ func newEchoServer(api *apiServer) *echo.Echo {
 		},
 		AllowHeaders: []string{
 			echo.HeaderAccept,
+			echo.HeaderAuthorization,
 			echo.HeaderContentType,
 			"Idempotency-Key",
 			"X-Request-Id",
@@ -49,6 +51,7 @@ func newEchoServer(api *apiServer) *echo.Echo {
 	}))
 	e.Use(requestContextMiddleware)
 	e.Use(recoverMiddleware)
+	e.Use(authMiddleware(auth))
 	e.HTTPErrorHandler = api.handleError
 
 	e.GET("/", func(c echo.Context) error {
@@ -61,8 +64,11 @@ func newEchoServer(api *apiServer) *echo.Echo {
 		)
 	})
 
+	// Health stays public: the container healthcheck and external probes call
+	// it without credentials, and it exposes no device data.
+	e.GET("/api/v1/health", api.health)
+
 	group := e.Group("/api/v1")
-	group.GET("/health", api.health)
 	group.GET("/devices", api.listDevices)
 	group.GET("/devices/:deviceId", api.getDevice)
 	group.PATCH("/devices/:deviceId", api.updateDevice)
@@ -82,6 +88,29 @@ func newEchoServer(api *apiServer) *echo.Echo {
 
 	e.Server.ReadHeaderTimeout = 10 * time.Second
 	return e
+}
+
+// authMiddleware requires the shared bearer token on every route except the
+// public banner and health probe. It runs globally rather than on the /api/v1
+// group because Echo group middleware installs a catch-all route, which turns
+// method-mismatch 405 responses into 404.
+func authMiddleware(auth authConfig) echo.MiddlewareFunc {
+	return middleware.KeyAuthWithConfig(middleware.KeyAuthConfig{
+		KeyLookup:  "header:" + echo.HeaderAuthorization,
+		AuthScheme: "Bearer",
+		Skipper: func(c echo.Context) bool {
+			path := c.Request().URL.Path
+			return path == "/" || path == "/api/v1/health"
+		},
+		Validator: func(key string, c echo.Context) (bool, error) {
+			return subtle.ConstantTimeCompare([]byte(key), []byte(auth.Token)) == 1, nil
+		},
+		// Keep the project error envelope; the Echo default would answer with
+		// {"message":"Unauthorized"} and bypass the client's error mapping.
+		ErrorHandler: func(err error, c echo.Context) error {
+			return writeAPIError(c, unauthorized())
+		},
+	})
 }
 
 func requestContextMiddleware(next echo.HandlerFunc) echo.HandlerFunc {

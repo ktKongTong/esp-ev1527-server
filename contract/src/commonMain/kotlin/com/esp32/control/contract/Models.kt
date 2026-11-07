@@ -4,7 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /** Semantic version of this shared contract module. */
-const val CONTRACT_VERSION: String = "2.1.0"
+const val CONTRACT_VERSION: String = "2.2.0"
 
 /** HTTP API version carried in [HealthResponse.apiVersion]. */
 const val API_VERSION: String = "1"

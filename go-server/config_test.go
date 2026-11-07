@@ -13,7 +13,8 @@ func clearConfigEnv(t *testing.T) {
 		"CONFIG_FILE", "SERVER_HOST", "SERVER_PORT", "MQTT_HOST", "MQTT_PORT",
 		"MQTT_USERNAME", "MQTT_PASSWORD", "MQTT_CLIENT_ID", "MQTT_TOPIC_PREFIX",
 		"MQTT_TRANSPORT", "MQTT_TLS", "MQTT_WS_PATH", "TURSO_DATABASE_URL",
-		"DATABASE_URL", "TURSO_AUTH_TOKEN", "GATEWAY_CLIENT_ID", "LOG_LEVEL",
+		"DATABASE_URL", "TURSO_AUTH_TOKEN", "AUTH_TOKEN", "GATEWAY_CLIENT_ID",
+		"LOG_LEVEL",
 	} {
 		t.Setenv(name, "")
 	}
@@ -46,13 +47,15 @@ INVALID LINE
 func TestLoadConfigPrecedence(t *testing.T) {
 	clearConfigEnv(t)
 	path := filepath.Join(t.TempDir(), "server.env")
-	content := "MQTT_HOST=file-broker\nSERVER_PORT=9000\nLOG_LEVEL=info\nTURSO_AUTH_TOKEN=file-token\n"
+	content := "MQTT_HOST=file-broker\nSERVER_PORT=9000\nLOG_LEVEL=info\n" +
+		"TURSO_AUTH_TOKEN=file-token\nAUTH_TOKEN=file-auth-token\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("CONFIG_FILE", path)
 	t.Setenv("MQTT_HOST", "env-broker")
 	t.Setenv("TURSO_DATABASE_URL", "libsql://env.turso.io")
+	t.Setenv("AUTH_TOKEN", "env-auth-token")
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -69,6 +72,12 @@ func TestLoadConfigPrecedence(t *testing.T) {
 	}
 	if strings.Contains(cfg.Database.String(), "file-token") {
 		t.Fatalf("Database.String leaked the auth token: %s", cfg.Database)
+	}
+	if cfg.Auth.Token != "env-auth-token" {
+		t.Fatalf("Auth.Token = %q, want env-auth-token", cfg.Auth.Token)
+	}
+	if strings.Contains(cfg.Auth.String(), "env-auth-token") {
+		t.Fatalf("Auth.String leaked the token: %s", cfg.Auth)
 	}
 	if cfg.Port != 9000 {
 		t.Fatalf("Port = %d, want 9000", cfg.Port)
@@ -102,10 +111,21 @@ func TestLoadConfigRequiresDatabaseURL(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRequiresAuthToken(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("MQTT_HOST", "broker")
+	t.Setenv("TURSO_DATABASE_URL", "libsql://test.turso.io")
+	_, err := loadConfig()
+	if err == nil || !strings.Contains(err.Error(), "AUTH_TOKEN") {
+		t.Fatalf("expected an AUTH_TOKEN error, got: %v", err)
+	}
+}
+
 func TestLoadConfigAcceptsDatabaseURLAlias(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("MQTT_HOST", "broker")
 	t.Setenv("DATABASE_URL", "libsql://alias.turso.io")
+	t.Setenv("AUTH_TOKEN", "test-auth-token")
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -120,6 +140,7 @@ func TestLoadConfigRejectsRawTCP(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("MQTT_HOST", "broker")
 	t.Setenv("TURSO_DATABASE_URL", "libsql://test.turso.io")
+	t.Setenv("AUTH_TOKEN", "test-auth-token")
 	t.Setenv("MQTT_TLS", "true")
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("expected an error for MQTT_TLS without websocket transport")
@@ -130,6 +151,7 @@ func TestLoadConfigWebSocketURL(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("MQTT_HOST", "broker")
 	t.Setenv("TURSO_DATABASE_URL", "libsql://test.turso.io")
+	t.Setenv("AUTH_TOKEN", "test-auth-token")
 	t.Setenv("MQTT_PORT", "8084")
 	t.Setenv("MQTT_TRANSPORT", "websocket")
 	t.Setenv("MQTT_TLS", "true")

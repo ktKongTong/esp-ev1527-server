@@ -50,6 +50,21 @@ func (c mqttConfig) String() string {
 	)
 }
 
+// authConfig holds the single API access token. The server accepts exactly one
+// token: this is a shared secret for a trusted deployment, not a user system.
+type authConfig struct {
+	Token string
+}
+
+// String redacts the token so config values can be logged.
+func (c authConfig) String() string {
+	token := "<none>"
+	if c.Token != "" {
+		token = "***"
+	}
+	return fmt.Sprintf("AuthConfig(token=%s)", token)
+}
+
 type databaseConfig struct {
 	URL   string
 	Token string
@@ -69,6 +84,7 @@ type config struct {
 	Port            int
 	MQTT            mqttConfig
 	Database        databaseConfig
+	Auth            authConfig
 	GatewayClientID string
 	CommandTopic    string
 	SubscribedTopic string
@@ -161,6 +177,12 @@ func loadConfig() (config, error) {
 			"TURSO_DATABASE_URL is required (DATABASE_URL is accepted as an alias)",
 		)
 	}
+	authToken := strings.TrimSpace(setting("AUTH_TOKEN"))
+	if authToken == "" {
+		return config{}, fmt.Errorf(
+			"AUTH_TOKEN is required; there is no unauthenticated mode",
+		)
+	}
 	gatewayClientID := setting("GATEWAY_CLIENT_ID")
 	if gatewayClientID == "" {
 		gatewayClientID = defaultGatewayClient
@@ -185,6 +207,7 @@ func loadConfig() (config, error) {
 			URL:   databaseURL,
 			Token: strings.TrimSpace(setting("TURSO_AUTH_TOKEN")),
 		},
+		Auth:            authConfig{Token: authToken},
 		GatewayClientID: gatewayClientID,
 		CommandTopic:    topicPrefix + "/commands/MQTTto433",
 		SubscribedTopic: topicPrefix + "/#",

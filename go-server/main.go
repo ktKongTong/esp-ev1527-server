@@ -23,6 +23,7 @@ func main() {
 		serverVersion, contractVersion, cfg.LogLevel,
 	)
 	infof("%s", cfg.MQTT)
+	infof("%s", cfg.Auth)
 	infof(
 		"http=%s database=%s subscribe=%s command=%s",
 		cfg.Host, cfg.Database, cfg.SubscribedTopic, cfg.CommandTopic,
@@ -71,7 +72,7 @@ func main() {
 		gateway:          gateway,
 		startedAtEpochMs: startedAtEpochMs,
 	}
-	server := newEchoServer(api)
+	server := newEchoServer(api, cfg.Auth)
 
 	go runBackgroundTasks(learningService, commandService, deviceService)
 

@@ -45,6 +45,7 @@ main.go           组装、后台 tick、优雅退出
 | --- | --- | --- |
 | `SERVER_HOST` | `0.0.0.0` | HTTP 监听地址 |
 | `SERVER_PORT` | `8080` | HTTP 端口 |
+| `AUTH_TOKEN` | 必填 | API 访问令牌；客户端发送 `Authorization: Bearer <token>`。未设置时拒绝启动 |
 | `TURSO_DATABASE_URL` | 必填 | Turso Cloud URL，例如 `libsql://<db>-<org>.turso.io` |
 | `DATABASE_URL` | 空 | `TURSO_DATABASE_URL` 的别名；两者都设置时以前者为准 |
 | `TURSO_AUTH_TOKEN` | 空 | Turso Cloud 数据库 token；本地 sqld 可留空 |
@@ -83,6 +84,7 @@ cd go-server
 TURSO_DATABASE_URL='libsql://<db>-<org>.turso.io' \
 TURSO_AUTH_TOKEN='<token>' \
 MQTT_HOST=broker.example.com \
+AUTH_TOKEN='<long-random-token>' \
 go run .
 ```
 
@@ -108,6 +110,7 @@ docker run -d --name esp32-control-go \
   -e MQTT_HOST=broker.example.com \
   -e TURSO_DATABASE_URL='libsql://<db>-<org>.turso.io' \
   -e TURSO_AUTH_TOKEN='<token>' \
+  -e AUTH_TOKEN='<long-random-token>' \
   ghcr.io/ktkongtong/esp-ev1527-server:latest
 ```
 
@@ -158,6 +161,17 @@ DELETE /api/v1/learning/sessions/:sessionId
 所有 JSON 字段为 lowerCamelCase；枚举值为 lower_snake_case；数组字段编码为
 `[]` 而不是 `null`。错误统一为 `{"error":{code,message,requestId,details}}`。
 
+除 `GET /api/v1/health` 与根路径 `/` 外，所有接口都要求
+`Authorization: Bearer <AUTH_TOKEN>`。缺失或错误时返回
+`401 {"error":{"code":"unauthorized"}}`，并带 `X-Request-Id`：
+
+```bash
+curl -H "Authorization: Bearer $AUTH_TOKEN" \
+  http://127.0.0.1:8080/api/v1/devices
+```
+
+健康检查保持公开：容器 `HEALTHCHECK` 与外部探针不需要凭据，响应中也不含设备数据。
+
 ## 数据库
 
 - 连接：`turso.tech/database/tursogo-serverless`，通过 `TURSO_DATABASE_URL` 与
@@ -189,7 +203,8 @@ Ktor/Kotlin Native 服务端已于 2026-11-07 移除，以下是仍然适用的�
 ```text
 Reused: gorm.io/gorm v1.31.2 + gorm.io/driver/sqlite v1.6.0
         (existing GORM persistence and migration path)
-Reused: github.com/labstack/echo/v4 v4.16.3 (existing HTTP layer)
+Reused: github.com/labstack/echo/v4 v4.16.3 (existing HTTP layer),
+        including middleware.KeyAuth for bearer-token auth
 Reused: github.com/eclipse/paho.mqtt.golang v1.5.1 (existing MQTT client)
 New dependency: turso.tech/database/tursogo-serverless
         v0.0.0-20261107095519-8e7eac038f1f

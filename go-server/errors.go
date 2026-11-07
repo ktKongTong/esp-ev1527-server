@@ -38,6 +38,14 @@ func invalidDeviceID() *apiError {
 	return newAPIError(http.StatusBadRequest, "invalid_device_id", "Invalid device id")
 }
 
+func unauthorized() *apiError {
+	return newAPIError(
+		http.StatusUnauthorized,
+		"unauthorized",
+		"Missing or invalid access token",
+	)
+}
+
 func deviceRemoved(removedAtEpochMs int64) *apiError {
 	return newAPIErrorDetails(
 		http.StatusGone,

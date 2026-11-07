@@ -28,6 +28,12 @@ server 作为客户端和网关沟通的中间节点，需要完成以下内容�
   未设置 `MQTT_HOST` 时启动失败，没有本地降级模式。
 - 配置读取顺序为环境变量 → `CONFIG_FILE` → `.env` → `go-server/.env` →
   `server/.env`（legacy）。环境变量优先。
+- 鉴权：`AUTH_TOKEN` 必填，未设置时启动失败。除 `/` 与
+  `GET /api/v1/health` 外，所有接口要求 `Authorization: Bearer <token>`；
+  校验由 Echo `middleware.KeyAuth` 完成，比较使用 `crypto/subtle` 常量时间。
+  失败返回 `401 unauthorized` 与统一错误信封。健康检查保持公开，供容器
+  `HEALTHCHECK` 与外部探针使用。
+  v1 仍是单一共享令牌，没有多用户、角色、审计或限流。
 - TLS：网关契约未定义裸 TCP TLS。托管 Broker 只开放 TLS 时，使用 MQTT over
   WebSocket Secure：`MQTT_TRANSPORT=websocket`、`MQTT_TLS=true`，端口与路径
   按 Broker 的 WSS 监听器配置（EMQX Cloud 为 8084 + `/mqtt`）。

@@ -187,7 +187,8 @@ private fun AppContent(
 
                             BottomTab.Settings -> SettingsScreen(
                                 serverUrl = state.serverUrl.orEmpty(),
-                                onSave = viewModel::saveServerUrl,
+                                apiToken = state.apiToken,
+                                onSave = viewModel::saveConnection,
                                 modifier = Modifier.widthIn(max = 720.dp),
                             )
                         }

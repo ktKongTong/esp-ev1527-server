@@ -5,7 +5,7 @@ package main
 // stay byte-for-byte compatible with contract/src/commonMain/.../Models.kt.
 
 const (
-	contractVersion = "2.1.0"
+	contractVersion = "2.2.0"
 	apiVersion      = "1"
 	serverVersion   = "0.2.0"
 	serviceName     = "esp32-control-server"

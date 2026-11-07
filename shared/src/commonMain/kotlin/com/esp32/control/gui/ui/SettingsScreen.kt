@@ -18,19 +18,24 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.esp32.control.gui.settings.normalizeServerUrl
 
 @Composable
 internal fun SettingsScreen(
     serverUrl: String,
-    onSave: (String) -> Unit,
+    apiToken: String,
+    onSave: (String, String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var input by remember(serverUrl) { mutableStateOf(serverUrl) }
+    var tokenInput by remember(apiToken) { mutableStateOf(apiToken) }
     val normalized = normalizeServerUrl(input)
+    val normalizedToken = tokenInput.trim()
     val valid = normalized.startsWith("http://") || normalized.startsWith("https://")
-    val changed = normalized.isNotEmpty() && normalized != serverUrl
+    val changed = normalized.isNotEmpty() &&
+        (normalized != serverUrl || normalizedToken != apiToken)
 
     Column(
         modifier = modifier
@@ -63,10 +68,39 @@ internal fun SettingsScreen(
                     color = MaterialTheme.colorScheme.error,
                 )
             }
+
+            Spacer(Modifier.height(20.dp))
+            Text("访问令牌", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = tokenInput,
+                onValueChange = { tokenInput = it },
+                singleLine = true,
+                shape = AppShapes.Field,
+                placeholder = { Text("服务端 AUTH_TOKEN") },
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = "与服务端 AUTH_TOKEN 一致；只保存在本机。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (normalizedToken.isEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "访问令牌不能为空。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+
             Spacer(Modifier.height(16.dp))
             Button(
-                onClick = { onSave(normalized) },
-                enabled = valid && changed,
+                onClick = { onSave(normalized, normalizedToken) },
+                enabled = valid && normalizedToken.isNotEmpty() && changed,
                 shape = CircleShape,
                 modifier = Modifier
                     .fillMaxWidth()

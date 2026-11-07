@@ -31,6 +31,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
+
+//
 /**
  * Owns all client state and the network work behind it. The composables only
  * render [state] and call the actions here, so configuration changes and
@@ -38,6 +40,7 @@ import kotlinx.coroutines.sync.withLock
  */
 internal data class AppUiState(
     val serverUrl: String? = null,
+    val apiToken: String = "",
     val selectedTab: BottomTab = BottomTab.Devices,
     val health: HealthResponse? = null,
     val devices: List<Device> = emptyList(),
@@ -90,7 +93,10 @@ internal class AppViewModel(
 
     init {
         viewModelScope.launch {
-            connect(settingsStore.serverUrl.first())
+            connect(
+                url = settingsStore.serverUrl.first(),
+                token = settingsStore.apiToken.first(),
+            )
         }
     }
 
@@ -98,13 +104,14 @@ internal class AppViewModel(
         _state.update { it.copy(selectedTab = tab) }
     }
 
-    fun saveServerUrl(value: String) {
-        val normalized = normalizeServerUrl(value)
+    fun saveConnection(url: String, token: String) {
+        val normalized = normalizeServerUrl(url)
         // Reconnect immediately, then persist: the UI should not wait for disk
         // I/O before showing the new server state.
-        connect(normalized)
+        connect(normalized, token)
         viewModelScope.launch {
             settingsStore.setServerUrl(normalized)
+            settingsStore.setApiToken(token)
         }
     }
 
@@ -406,17 +413,18 @@ internal class AppViewModel(
         api?.close()
     }
 
-    private fun connect(url: String) {
+    private fun connect(url: String, token: String) {
         connectionJob.cancel()
         connectionJob = SupervisorJob(viewModelScope.coroutineContext[Job])
         connectionScope = CoroutineScope(viewModelScope.coroutineContext + connectionJob)
         learningPollJob = null
         api?.close()
-        val client = Esp32Api(url)
+        val client = Esp32Api(baseUrl = url, token = token)
         api = client
         _state.update {
             it.copy(
                 serverUrl = url,
+                apiToken = token,
                 health = null,
                 devices = emptyList(),
                 loading = true,
@@ -552,6 +560,10 @@ internal class AppViewModel(
 
 private fun Throwable.readableMessage(): String {
     if (this is ClientApiException) {
+        if (code == "unauthorized") {
+            return "访问令牌无效或缺失，请在设置中更新" +
+                requestId?.let { "（request $it）" }.orEmpty()
+        }
         return "$code：$message" + requestId?.let { "（request $it）" }.orEmpty()
     }
     // Transport failures carry English platform messages that mean nothing to

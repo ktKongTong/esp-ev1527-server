@@ -43,9 +43,10 @@ COPY --from=build /out/esp32-control-server /usr/local/bin/esp32-control-server
 USER app
 WORKDIR /app
 
-# MQTT_HOST, TURSO_DATABASE_URL, and TURSO_AUTH_TOKEN have no defaults and
-# must be supplied at runtime. The database is remote, so the container needs
-# no persistent volume.
+# MQTT_HOST, TURSO_DATABASE_URL, TURSO_AUTH_TOKEN, and AUTH_TOKEN have no
+# defaults and must be supplied at runtime. AUTH_TOKEN is the API bearer token;
+# the server refuses to start without it. The database is remote, so the
+# container needs no persistent volume.
 ENV SERVER_HOST=0.0.0.0 \
     SERVER_PORT=8080
 

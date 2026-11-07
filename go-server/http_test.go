@@ -11,6 +11,8 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
+const testAuthToken = "test-auth-token"
+
 func newTestAPI(t *testing.T) (*echo.Echo, *deviceRepository, *fakeTransmitter, *int64) {
 	t.Helper()
 	db := newTestDB(t)
@@ -39,9 +41,11 @@ func newTestAPI(t *testing.T) (*echo.Echo, *deviceRepository, *fakeTransmitter, 
 		gateway:          gateway,
 		startedAtEpochMs: nowEpochMs() - 65_000,
 	}
-	return newEchoServer(api), devices, transmitter, &now
+	return newEchoServer(api, authConfig{Token: testAuthToken}), devices, transmitter, &now
 }
 
+// doRequest sends an authenticated request. Tests that exercise the auth
+// middleware itself use doRequestWithAuth.
 func doRequest(
 	t *testing.T,
 	e *echo.Echo,
@@ -49,9 +53,26 @@ func doRequest(
 	headers map[string]string,
 ) *httptest.ResponseRecorder {
 	t.Helper()
+	return doRequestWithAuth(
+		t, e, method, target, body, contentType, headers,
+		"Bearer "+testAuthToken,
+	)
+}
+
+func doRequestWithAuth(
+	t *testing.T,
+	e *echo.Echo,
+	method, target, body, contentType string,
+	headers map[string]string,
+	authorization string,
+) *httptest.ResponseRecorder {
+	t.Helper()
 	request := httptest.NewRequest(method, target, strings.NewReader(body))
 	if contentType != "" {
 		request.Header.Set(echo.HeaderContentType, contentType)
+	}
+	if authorization != "" {
+		request.Header.Set(echo.HeaderAuthorization, authorization)
 	}
 	for name, value := range headers {
 		request.Header.Set(name, value)
@@ -100,6 +121,67 @@ func TestHTTPHealth(t *testing.T) {
 	}
 	if health.Gateway.State != gatewayOnline || health.Gateway.Receiver.State != receiverUnknown {
 		t.Fatalf("unexpected gateway: %+v", health.Gateway)
+	}
+}
+
+func TestHTTPHealthIsPublic(t *testing.T) {
+	e, _, _, _ := newTestAPI(t)
+	recorder := doRequestWithAuth(
+		t, e, http.MethodGet, "/api/v1/health", "", "", nil, "",
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHTTPRequiresBearerToken(t *testing.T) {
+	e, _, _, _ := newTestAPI(t)
+	cases := []struct {
+		name          string
+		authorization string
+	}{
+		{"missing header", ""},
+		{"wrong token", "Bearer wrong-token"},
+		{"wrong scheme", "Basic " + testAuthToken},
+		{"bare token", testAuthToken},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := doRequestWithAuth(
+				t, e, http.MethodGet, "/api/v1/devices", "", "", nil, tc.authorization,
+			)
+			if recorder.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+			if got := recorder.Header().Get("X-Request-Id"); got == "" {
+				t.Fatal("unauthorized response has no X-Request-Id")
+			}
+			envelope := decodeErrorEnvelope(t, recorder)
+			if envelope.Error.Code != "unauthorized" || envelope.Error.RequestID == "" {
+				t.Fatalf("unexpected envelope: %+v", envelope)
+			}
+		})
+	}
+}
+
+func TestHTTPProtectsWrites(t *testing.T) {
+	e, _, _, _ := newTestAPI(t)
+	recorder := doRequestWithAuth(
+		t, e, http.MethodPost, "/api/v1/learning/sessions", "", "", nil, "",
+	)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHTTPAcceptsBearerSchemeCaseInsensitively(t *testing.T) {
+	e, _, _, _ := newTestAPI(t)
+	recorder := doRequestWithAuth(
+		t, e, http.MethodGet, "/api/v1/devices", "", "", nil,
+		"bearer "+testAuthToken,
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -407,8 +489,9 @@ func TestHTTPUpdateRemovedDeviceReturnsGone(t *testing.T) {
 func TestHTTPCORS(t *testing.T) {
 	e, _, _, _ := newTestAPI(t)
 	recorder := doRequest(t, e, http.MethodOptions, "/api/v1/devices", "", "", map[string]string{
-		"Origin":                        "http://localhost:8080",
-		"Access-Control-Request-Method": http.MethodGet,
+		"Origin":                         "http://localhost:8080",
+		"Access-Control-Request-Method":  http.MethodGet,
+		"Access-Control-Request-Headers": echo.HeaderAuthorization,
 	})
 	if recorder.Code != http.StatusNoContent {
 		t.Fatalf("preflight status = %d", recorder.Code)
@@ -419,5 +502,9 @@ func TestHTTPCORS(t *testing.T) {
 	allowed := recorder.Header().Get("Access-Control-Allow-Methods")
 	if !strings.Contains(allowed, http.MethodPost) || !strings.Contains(allowed, http.MethodDelete) {
 		t.Fatalf("allow methods = %q", allowed)
+	}
+	allowedHeaders := recorder.Header().Get("Access-Control-Allow-Headers")
+	if !strings.Contains(allowedHeaders, echo.HeaderAuthorization) {
+		t.Fatalf("allow headers = %q, want Authorization", allowedHeaders)
 	}
 }

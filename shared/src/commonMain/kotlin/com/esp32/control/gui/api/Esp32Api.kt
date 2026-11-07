@@ -18,6 +18,7 @@ import com.esp32.control.contract.UpdateDeviceRequest
 import io.ktor.client.HttpClient
 import io.ktor.client.HttpClientConfig
 import io.ktor.client.call.body
+import io.ktor.client.plugins.DefaultRequest
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.delete
@@ -28,15 +29,16 @@ import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
 import kotlin.random.Random
 
-expect fun createPlatformHttpClient(): HttpClient
+expect fun createPlatformHttpClient(authToken: String = ""): HttpClient
 
 expect fun apiBaseUrl(): String
 
-internal fun HttpClientConfig<*>.configureEsp32Client() {
+internal fun HttpClientConfig<*>.configureEsp32Client(authToken: String = "") {
     expectSuccess = false
     install(ContentNegotiation) {
         json(ContractJson)
@@ -45,6 +47,13 @@ internal fun HttpClientConfig<*>.configureEsp32Client() {
         requestTimeoutMillis = 10_000
         connectTimeoutMillis = 10_000
         socketTimeoutMillis = 10_000
+    }
+    if (authToken.isNotEmpty()) {
+        // Sent on every call, including health: the client never needs a
+        // separate authentication step, and the token is not part of the URL.
+        install(DefaultRequest) {
+            header(HttpHeaders.Authorization, "Bearer $authToken")
+        }
     }
 }
 
@@ -56,8 +65,9 @@ class ClientApiException(
 ) : RuntimeException(message)
 
 class Esp32Api(
-    val baseUrl: String = apiBaseUrl(),
-    private val client: HttpClient = createPlatformHttpClient(),
+    val baseUrl: String,
+    val token: String = "",
+    private val client: HttpClient = createPlatformHttpClient(token),
 ) {
     private val root: String = "$baseUrl/api/v1"
 

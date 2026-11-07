@@ -4,8 +4,8 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.js.Js
 import kotlinx.browser.window
 
-actual fun createPlatformHttpClient(): HttpClient = HttpClient(Js) {
-    configureEsp32Client()
+actual fun createPlatformHttpClient(authToken: String): HttpClient = HttpClient(Js) {
+    configureEsp32Client(authToken)
 }
 
 /**

@@ -1,6 +1,6 @@
 # ESP32 Control 接口、状态机与数据流契约 v1
 
-- 状态：**已实现**（`CONTRACT_VERSION = "2.1.0"`）
+- 状态：**已实现**（`CONTRACT_VERSION = "2.2.0"`）
 - 日期：2026-11-03
 - 适用端：`go-server`、`androidApp`、`webApp`
 - 覆盖范围：**控制设备开关、学习新设备、编辑设备信息、移除旧设备**，以及这些流程依赖的
@@ -374,6 +374,7 @@ val ContractJson = Json {
 
 | Header | 方向 | 必填 | 说明 |
 | --- | --- | --- | --- |
+| `Authorization` | 请求 | 是（健康检查除外） | `Bearer <AUTH_TOKEN>` |
 | `Accept` | 请求 | 建议 | `application/json` |
 | `Content-Type` | 请求 | POST 必填 | `application/json` |
 | `X-Request-Id` | 请求 | 否 | 客户端可传；服务端回显 |
@@ -418,11 +419,16 @@ val ContractJson = Json {
 
 - 开发：允许 `*`；生产：Origin 白名单。
 - 方法：`GET, POST, DELETE, OPTIONS`。
-- 请求头：`Accept, Content-Type, Idempotency-Key, X-Request-Id`。
+- 请求头：`Accept, Authorization, Content-Type, Idempotency-Key, X-Request-Id`。
 - 暴露头：`X-Request-Id`、`Idempotent-Replayed`。
-- 不使用 Cookie/凭据（v1）。
-- v1 无鉴权，仅限可信局域网；远程部署必须加认证与 TLS。
-- 学习/控制/删除都是高风险写操作，后续必须做权限控制与审计。
+- 不使用 Cookie；凭据只放在 `Authorization` 头，不放在 URL 或查询参数。
+- v1 使用单一共享令牌：服务端 `AUTH_TOKEN` 与客户端设置项一致，
+  除 `/` 与 `GET /api/v1/health` 外所有接口都要求
+  `Authorization: Bearer <token>`；缺失或错误返回
+  `401 unauthorized`，响应头带 `X-Request-Id`。
+- 健康检查保持公开，供容器探针与外部监控使用；响应不含设备数据。
+- 令牌是部署级共享密钥，不区分用户；泄露后需要更新服务端与所有客户端。
+- 学习/控制/删除都是高风险写操作，v2 再补权限模型与审计。
 
 ---
 
@@ -1103,7 +1109,7 @@ v1 不提供事件流。所有状态变化通过快照接口读取：
 2. 接收器不是 `unavailable`；否则 `503 receiver_unavailable`。
    `unknown` 允许开始，但 UI 应提示“尚未观察到 RF 信号”。
 3. 没有活动学习会话；否则 `409 learning_busy`，`details.activeSessionId`。
-4. 写权限（v1 暂为可信局域网；生产需鉴权）。
+4. 写权限：请求必须携带有效 Bearer 令牌；单令牌不区分操作人。
 
 服务端收到开始请求后：
 
@@ -1343,7 +1349,7 @@ OMG 315 没有标准的“开始学习”指令，服务端无法远程打开一
 
 - 设备存在且 `active`；已 `removed` 时按幂等处理。
 - 移除是**服务端操作**，不依赖网关在线，不发送 MQTT。
-- 移除需要用户确认（客户端职责），生产环境需要鉴权。
+- 移除需要用户确认（客户端职责）；接口要求 Bearer 令牌。
 
 ### 9.2 状态转换
 
@@ -1474,6 +1480,7 @@ active --DELETE--> removed
 
 ```http
 POST /api/v1/devices/dev_01JB.../commands HTTP/1.1
+Authorization: Bearer <AUTH_TOKEN>
 Content-Type: application/json
 Idempotency-Key: 6f0e5b3a-9d0c-4c1e-8a3f-2d7b9c6a1e42
 X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
@@ -1580,6 +1587,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 
 | code | HTTP | 场景 |
 | --- | --- | --- |
+| `unauthorized` | 401 | 缺失或错误的 Bearer 令牌 |
 | `invalid_request` | 400 | 参数/请求体语义错误 |
 | `invalid_device_id` | 400 | 设备 ID 非法 |
 | `malformed_json` | 400 | JSON 解析失败 |
@@ -1608,7 +1616,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 ## 13. 版本演进与兼容
 
 - 路径版本 `/api/v1`，`HealthResponse.apiVersion = "1"`。
-- `contract` 模块语义版本 `CONTRACT_VERSION = "2.1.0"`。
+- `contract` 模块语义版本 `CONTRACT_VERSION = "2.2.0"`。
   - `1.1.0`（2026-11-03）：学习改为“按键聚类 + 候选确认”模型；
     新增 candidate accept / rescan，移除旧的重学/手动指定接口。
   - `1.2.0`（2026-11-03）：移除 SSE 事件类型与 `GET /api/v1/events`；
@@ -1633,6 +1641,11 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
   - `2.1.0`（2026-11-06）：新增 `PATCH /api/v1/devices/{id}` 与
     `UpdateDeviceRequest`，允许编辑设备名称和位置。只修改 `name` / `location`，
     不动码、RF 参数与生命周期；属于向后兼容的增量端点。
+  - `2.2.0`（2026-11-07）：新增 API 鉴权。服务端要求 `AUTH_TOKEN`，
+    除 `/` 与 `GET /api/v1/health` 外所有接口要求
+    `Authorization: Bearer <token>`，失败返回 `401 unauthorized`。
+    这是行为级破坏性变更：未带令牌的旧客户端会被拒绝，必须同步升级；
+    协议路径仍为 `/api/v1`。
   - 协议版本不变（2026-11-07）：移除 Ktor/Kotlin Native 服务端；
     `go-server` 成为唯一实现，持久化从本地 SQLite + Room3 切换到
     Turso Cloud + GORM。HTTP/MQTT 契约、状态机与表结构保持不变。
@@ -1738,10 +1751,12 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 
 ## 15. 安全
 
-- v1 无鉴权，仅可信局域网；远程部署必须反向代理 + TLS + 鉴权。
+- v1 使用单一 Bearer 令牌（`AUTH_TOKEN`）。除 `/` 与
+  `GET /api/v1/health` 外所有接口都要求令牌；令牌不区分用户，也不提供审计。
+- 令牌必须以 HTTPS 或加密隧道（例如 Tailscale）承载；明文 HTTP 会泄露令牌。
 - 学习、控制、删除都是高风险写操作：
-  - 生产环境必须做角色/权限校验；
-  - 记录 `requestId`、`sessionId`、`deviceId`、动作、结果；
+  - v2 必须做角色/权限校验；
+  - 当前只记录 `requestId`，动作审计待补；
   - 限制学习频率和同时会话数。
 - 不向客户端返回 MQTT 凭据、Broker 地址、内部路径。
 - 只接受来自配置主题的网关捕获；禁止客户端直接提交 RF 码。
@@ -1749,7 +1764,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
   - 每设备命令：10 次/分钟；
   - 学习开始：5 次/小时。
 - tombstone 与幂等 key 持久化在 Turso；tombstone 保留 24h，幂等 key 保留 10min。
-  鉴权与审计日志仍待生产环境补齐。
+  共享令牌鉴权已实现；角色权限与审计日志仍待补齐。
 
 ---
 
@@ -1810,7 +1825,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 
 ## 17. 与当前实现的差异与迁移
 
-| 项 | 上一版 | 当前（contract 2.1.0） |
+| 项 | 上一版 | 当前（contract 2.2.0） |
 | --- | --- | --- |
 | MQTT | KMQTT 适配层 | paho.mqtt.golang（MQTT 3.1.1），自动重连 |
 | 持久化 | 进程内状态 | Turso Cloud + GORM，重启不丢设备/幂等 key |
@@ -1824,6 +1839,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 | 设备列表 | 裸数组 | `{ devices, serverTimeEpochMs }` |
 | 事件 | SSE + 轮询降级 | 仅轮询（SSE 已移除） |
 | 错误 | `{error,message}` | `{error:{code,message,requestId,details}}` |
+| 鉴权 | 无（仅可信局域网） | 单一 Bearer 令牌（`AUTH_TOKEN`）；健康检查公开 |
 | 共享模型 | 服务端/客户端各一份 | Kotlin 客户端共用 `contract`；Go 服务端镜像 `contract.go` |
 | 服务端结构 | `ControlPlane` 单对象 | `main.go` 组合根 + 领域服务 + 仓储 + GORM |
 
@@ -1838,7 +1854,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 5. 服务端 v1 路由：健康、设备（含编辑）、命令、学习、删除；无 SSE。
 6. 客户端轮询；控制/学习/移除交互保持 v1 语义。
 
-`contract 2.1.0` 的 HTTP/MQTT 语义不因服务端从 Ktor 切换到 Go、或从本地
+`contract 2.2.0` 的 HTTP/MQTT 语义不因服务端从 Ktor 切换到 Go、或从本地
 SQLite 切换到 Turso 而改变。
 
 ---
@@ -1933,7 +1949,7 @@ SQLite 切换到 Turso 而改变。
 | 6 | 事件流用 SSE 还是 WebSocket？ | v1 不提供事件流；客户端按场景轮询，如需双向再评估 |
 | 7 | 学习捕获是否需要持久化？ | 不持久化；会话、候选与命中计数都在内存，重启即失效 |
 | 8 | 命令是否需要离线队列？ | v1 不排队，网关离线直接拒绝 |
-| 9 | 删除/学习是否需要审批？ | 生产环境至少要求认证；高风险操作可加二次确认 |
+| 9 | 删除/学习是否需要审批？ | v1 要求 Bearer 令牌；高风险操作可加二次确认 |
 | 10 | 生产固件是否提供接收器状态主题？ | 需要确认；若不提供，v1 只能用 `unknown/receiving` 推断，不能保证“接收器已就绪” |
 | 11 | 是否给固件增加接收器武装/学习模式指令？ | v1 不依赖；若增加，定义为可选扩展，并保留“捕获必须来自网关”的原则 |
 | 12 | 单键 toggle 设备（只有一个码）是否支持？ | v1 只做开/关配对；toggle 需要独立学习模式，不能复用双槽位状态机 |
