@@ -1,6 +1,6 @@
 # Docker builds use the repository root as context. Keep credentials and
-# machine-local files out of the daemon/build cache; each Dockerfile copies
-# only the source it needs (`contract/` + `server/`, or `go-server/`).
+# machine-local files out of the daemon/build cache; the Go server image copies
+# only `go-server/`.
 
 # Version control and IDE state
 .git

@@ -2,7 +2,7 @@
 
 - 状态：**已实现**（`CONTRACT_VERSION = "2.1.0"`）
 - 日期：2026-11-03
-- 适用端：`server`（Ktor + Kotlin/Native）、`go-server`、`androidApp`、`webApp`
+- 适用端：`go-server`、`androidApp`、`webApp`
 - 覆盖范围：**控制设备开关、学习新设备、编辑设备信息、移除旧设备**，以及这些流程依赖的
   网关状态机、设备生命周期、命令发布语义、学习会话状态机和轮询一致性
 
@@ -66,11 +66,11 @@
 ```
 ┌──────────┐   HTTP/JSON       ┌──────────────┐   MQTT   ┌───────────┐  315MHz RF  ┌────────┐
 │ Android  │ ◄───────────────► │    Server    │ ◄──────► │  Gateway  │ ◄─────────► │ Remote │
-│   Web    │                   │ Kotlin/Native│          │  ESP32    │             │ Button │
+│   Web    │                   │   Go/Echo    │          │  ESP32    │             │ Button │
 └──────────┘                   └──────────────┘          └───────────┘             └────────┘
                                     │ 设备注册表/幂等去重/学习会话
                                     ▼
-                              contract (KMP)
+                              Turso Cloud
 ```
 
 - **Gateway**：OpenMQTTGateway v1.7+，负责 315MHz 无线收发和 MQTT 桥接。
@@ -237,7 +237,9 @@ Server ──200 Device（更新后的快照）──► Client ──替换本�
 
 ### 3.1 模块职责
 
-新增 `contract` KMP 模块，三端共用：
+新增 `contract` KMP 模块，供 Android/Web 客户端共用。Go 服务端无法直接消费
+KMP 产物，在 `go-server/contract.go` 中镜像同一组 DTO、枚举与常量；
+协议变更必须同时更新两处，并以本文为准。
 
 - 所有 HTTP DTO、枚举
 - 路由/Header/错误码常量
@@ -246,7 +248,7 @@ Server ──200 Device（更新后的快照）──► Client ──替换本�
 
 不放入 `contract`：
 
-- Ktor `HttpClient`、轮询调度
+- HTTP 客户端、轮询调度
 - Compose UI、中文文案
 - MQTT 客户端
 - 服务端数据库、仓储、命令执行器、学习管理器
@@ -255,10 +257,10 @@ Server ──200 Device（更新后的快照）──► Client ──替换本�
 
 | Target | 消费者 | 说明 |
 | --- | --- | --- |
-| `linuxArm64` | `server` | 现有部署目标 |
-| `macosArm64` | `server`（本地调试） | 所有主机声明；非 macOS 主机由 Kotlin 自动禁用 |
 | `androidLibrary` | `shared` / `androidApp` | AGP 9 KMP library 插件 |
 | `wasmJs` | `shared` / `webApp` | 库 + browser 目标 |
+
+Ktor/Kotlin Native 服务端移除后，`contract` 不再声明 Linux/macOS 目标。
 
 `contract` 的 `commonMain` 只依赖 `kotlinx-serialization-core/json`。
 Android 目标继续使用 `kotlin { androidLibrary { ... } }`，
@@ -267,58 +269,61 @@ Android 目标继续使用 `kotlin { androidLibrary { ... } }`，
 ### 3.3 依赖方向
 
 ```
-server ─────────────┐
-                    ├──► contract
-shared ─────────────┘
+shared ───────► contract
   ├──► androidApp
   └──► webApp
+
+go-server/contract.go ── mirrors ──► contract (Go structs)
 ```
 
-- 服务端：`implementation(project(":contract"))`
 - `shared`：`api(project(":contract"))`，让两个 GUI 都能使用 DTO
-- 禁止在 `server` 与 `shared` 各维护一份同名模型
+- Go 服务端无法导入 KMP 模块，`go-server/contract.go` 是跨语言边界的镜像；
+  JSON 字段、枚举值与错误码必须与 `contract` 一致
+- 禁止在 Kotlin 客户端侧重复定义同名 DTO
 
 ### 3.4 服务端内部模块
 
-服务端按职责分层，不使用单一 `ControlPlane` 对象。`Main.kt` 只是组合根：
+服务端按职责分层，不使用单一 `ControlPlane` 对象。`main.go` 只是组合根：
 
 ```
-MQTT Transport ──► GatewayIngest ──► LearningService (捕获聚类/状态机)
-HTTP Routes ─────► DeviceService / CommandService / LearningService
-Services ────────► Repositories ──► Room3 DAO ──► SQLite
-CommandService ──► RfTransmitter ──► MQTT Transport
+MQTT (mqtt.go) ──► GatewayIngest (gateway.go) ──► LearningService (捕获聚类/状态机)
+HTTP (http.go) ──► DeviceService / CommandService / LearningService
+Services ────────► Repositories (repositories.go) ──► GORM (store.go) ──► Turso
+CommandService ──► MQTTTransmitter ──► MQTT
 ```
 
 | 层 | 位置 | 职责 |
 | --- | --- | --- |
-| 组合根 | `server/.../Main.kt` | 读取配置、创建数据库/服务/MQTT、启动 HTTP 与定时器 |
-| 传输适配 | `server/.../mqtt/` | ktor-mqtt 连接、订阅、发布、重连监督；RF 抓码摄入、网关运行时状态与 RF 下发 |
-| 领域服务 | `server/.../domain/` | 设备、命令发布、学习状态机 |
-| 数据访问 | `server/.../data/` | 仓储与 entity ↔ contract 映射 |
-| 持久化 | `server/.../db/` | Room3 entity、DAO、`AppDatabase`、SQLite 驱动 |
-| HTTP | `server/.../routes/` | 参数/请求体解析、状态码映射；不含状态机 |
+| 组合根 | `go-server/main.go` | 读取配置、创建数据库/服务/MQTT、启动 HTTP 与定时器 |
+| HTTP | `go-server/http.go` | 参数/请求体解析、状态码映射；不含状态机 |
+| 领域服务 | `go-server/devices.go`、`commands.go`、`learning.go` | 设备、命令发布、学习状态机 |
+| 数据访问 | `go-server/repositories.go` | 仓储与 row ↔ contract 映射 |
+| 持久化 | `go-server/store.go` | GORM row 模型、Turso 连接、`AutoMigrate` |
+| MQTT / 网关 | `go-server/mqtt.go`、`gateway.go` | paho 连接、订阅、发布、重连；RF 抓码摄入与网关运行时状态 |
+| 跨语言 DTO | `go-server/contract.go` | 镜像 `contract` 的 DTO、枚举与版本常量 |
 
 约束：
 
 - 状态机逻辑只放在领域服务中，不放 HTTP 路由或客户端。
-- 服务之间的共享状态要么在 SQLite，要么在明确的运行时存储
-  （`mqtt/GatewayStatusStore`），不通过全局可变对象传递。
-- MQTT 回调只做解析和转发；业务判定由 `CommandService`/`LearningService` 完成。
+- 服务之间的共享状态要么在 Turso，要么在明确的运行时存储
+  （`gatewayStatusStore`），不通过全局可变对象传递。
+- MQTT 回调只做解析和转发；业务判定由 `commandService`/`learningService` 完成。
 
-### 3.5 持久化（SQLite + Room3）
+### 3.5 持久化（Turso Cloud + GORM）
 
-- 数据库：SQLite，通过 `androidx.sqlite:sqlite-bundled` 的
-  `BundledSQLiteDriver` 运行，不依赖宿主机 libsqlite。
-- ORM：Room3（`androidx.room3`）。schema 由 KSP 生成，导出到
-  `server/schemas/`。
-- 路径：`DATABASE_PATH`，默认 `esp32-control.db`；相对路径基于进程工作目录。
+- 数据库：Turso Cloud（SQLite 兼容），通过
+  `turso.tech/database/tursogo-serverless` 的纯 Go 驱动连接。
+  `TURSO_DATABASE_URL` 为必填，`TURSO_AUTH_TOKEN` 用于 Turso Cloud；
+  `DATABASE_URL` 是 `TURSO_DATABASE_URL` 的别名。不落容器本地磁盘。
+- ORM：GORM（`gorm.io/gorm` + `gorm.io/driver/sqlite`）。dialector 只提供
+  SQLite SQL 与 `AutoMigrate`，连接由 Turso 驱动提供，不打开本地文件。
 - 表：
   - `devices`：遥控器名称、位置、开/关码与 RF 参数。没有状态列。
   - `device_tombstones`：移除时间，保留 24h。
   - `idempotency`：幂等 key → 请求指纹 + 发布时间，TTL 10min。
     这是去重状态，不是命令历史。
-- 事务：跨表写入使用 `withWriteTransaction`；MQTT 发布不在事务内，
-  避免网络阻塞数据库锁。
+- 事务：跨表写入使用 GORM `Transaction`；MQTT 发布不在事务内，
+  避免网络 I/O 阻塞数据库事务。
 - 运行时状态：
   - 网关在线状态与接收器证据不持久化；服务端重启后先按 unknown 处理，
     由 retained LWT/version 恢复。
@@ -774,7 +779,7 @@ data class HealthResponse(
   "service": "esp32-control-server",
   "apiVersion": "1",
   "version": "0.2.0",
-  "runtime": "Kotlin/Native",
+  "runtime": "Go",
   "uptimeSeconds": 42,
   "serverTimeEpochMs": 1760000000000,
   "gateway": {
@@ -1628,6 +1633,9 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
   - `2.1.0`（2026-11-06）：新增 `PATCH /api/v1/devices/{id}` 与
     `UpdateDeviceRequest`，允许编辑设备名称和位置。只修改 `name` / `location`，
     不动码、RF 参数与生命周期；属于向后兼容的增量端点。
+  - 协议版本不变（2026-11-07）：移除 Ktor/Kotlin Native 服务端；
+    `go-server` 成为唯一实现，持久化从本地 SQLite + Room3 切换到
+    Turso Cloud + GORM。HTTP/MQTT 契约、状态机与表结构保持不变。
 - 允许：新增响应字段、新增端点、新增错误码（旧客户端忽略未知字段）。
 - 需要客户端先行：新增枚举值（严格反序列化会失败）。
 - 破坏性：删除/重命名字段、改变类型/语义、改变状态码、改变状态机语义
@@ -1740,7 +1748,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - 速率限制建议：
   - 每设备命令：10 次/分钟；
   - 学习开始：5 次/小时。
-- tombstone 与幂等 key 持久化在 SQLite；tombstone 保留 24h，幂等 key 保留 10min。
+- tombstone 与幂等 key 持久化在 Turso；tombstone 保留 24h，幂等 key 保留 10min。
   鉴权与审计日志仍待生产环境补齐。
 
 ---
@@ -1758,14 +1766,12 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 
 服务端 MQTT 实现：
 
-- 客户端：`dev.koft.ktor-mqtt:mqtt-client:1.2.2`（ktor-mqtt 的
-  `linuxArm64` / `linuxX64` / `macosArm64` 构建）。
-- 协议：客户端使用 MQTT 5；OpenMQTTGateway/PicoMQTT 仍是 MQTT 3.1.1。
-  EMQX 等 Broker 在同一连接内做协议版本桥接，因此网关固件不需要升级。
+- 客户端：`eclipse/paho.mqtt.golang` v1.5.1。
+- 协议：客户端使用 MQTT 3.1.1，与 OpenMQTTGateway/PicoMQTT 一致。
 - 订阅：`MQTT_TOPIC_PREFIX/#`，QoS 1。
 - 发布：命令主题，QoS 1，不使用 retain。
-- 重连：ktor-mqtt 不自动重连；`MqttTransport` 负责有界指数退避
-  （1s → 30s，带抖动），会话稳定 30s 后重置退避。
+- 重连：paho 的 `AutoReconnect` / `ConnectRetry` 负责自动重连；
+  `mqtt.go` 只处理连接/断开回调与主题分发。
 - 主题与凭据从环境变量或配置文件读取，不写入日志或 API 响应。
 
 规则：
@@ -1806,30 +1812,34 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 
 | 项 | 上一版 | 当前（contract 2.1.0） |
 | --- | --- | --- |
-| MQTT | KMQTT 适配层 | ktor-mqtt（MQTT 5 客户端），保留重连监督 |
-| 持久化 | 进程内状态 | SQLite + Room3，重启不丢设备/幂等 key |
+| MQTT | KMQTT 适配层 | paho.mqtt.golang（MQTT 3.1.1），自动重连 |
+| 持久化 | 进程内状态 | Turso Cloud + GORM，重启不丢设备/幂等 key |
 | 设备来源 | 启动时两条内存数据 | 学习确认动态创建并持久化 |
 | 控制 | `POST /api/devices/{id}/toggle` | `POST /api/v1/devices/{id}/commands` |
 | 设备状态 | `on: Boolean` | 无状态字段；只保存开/关码 |
 | 最近动作 | 中文 `lastAction: String` | 已删除；不保存命令历史 |
 | 设备移除 | 无 | `DELETE /devices/{id}` + tombstone + 码释放 |
 | 设备信息编辑 | 无 | `PATCH /devices/{id}`（名称/位置） |
-| 学习 | 无 | 网关接收器常开上报 + 按键聚类 + 候选确认状态机 + SQLite |
+| 学习 | 无 | 网关接收器常开上报 + 按键聚类 + 候选确认状态机 + Turso |
 | 设备列表 | 裸数组 | `{ devices, serverTimeEpochMs }` |
 | 事件 | SSE + 轮询降级 | 仅轮询（SSE 已移除） |
 | 错误 | `{error,message}` | `{error:{code,message,requestId,details}}` |
-| 共享模型 | 服务端/客户端各一份 | 独立 `contract` 模块 |
-| 服务端结构 | `ControlPlane` 单对象 | 组合根 + 领域服务 + 仓储 + Room3 DAO |
+| 共享模型 | 服务端/客户端各一份 | Kotlin 客户端共用 `contract`；Go 服务端镜像 `contract.go` |
+| 服务端结构 | `ControlPlane` 单对象 | `main.go` 组合根 + 领域服务 + 仓储 + GORM |
 
-当前实现顺序（已完成）：
+当前实现（Go 服务端）：
 
-1. `contract` 模块 + 学习状态枚举 + 序列化合同测试。
-2. 服务端领域拆分：`DeviceService`、`CommandService`、`LearningService`、
-   `GatewayIngest`、`GatewayStatusStore`。
-3. SQLite/Room3：entity、DAO、数据库工厂、仓储与映射。
-4. MQTT：ktor-mqtt 传输、LWT/version/捕获摄入、命令单向下发。
-5. 服务端 v1 路由：健康、设备、命令、学习、删除；无 SSE。
-6. 客户端改为轮询；控制/学习/移除交互保持 v1 语义。
+1. `contract` 模块 + 学习状态枚举 + 序列化合同测试；`go-server/contract.go`
+   镜像同一协议。
+2. 领域拆分：`deviceService`、`commandService`、`learningService`、
+   `gatewayIngest`、`gatewayStatusStore`。
+3. 持久化：GORM row 模型、仓储、Turso Cloud 连接与 `AutoMigrate`。
+4. MQTT：paho 传输、LWT/version/捕获摄入、命令单向下发。
+5. 服务端 v1 路由：健康、设备（含编辑）、命令、学习、删除；无 SSE。
+6. 客户端轮询；控制/学习/移除交互保持 v1 语义。
+
+`contract 2.1.0` 的 HTTP/MQTT 语义不因服务端从 Ktor 切换到 Go、或从本地
+SQLite 切换到 Turso 而改变。
 
 ---
 

@@ -25,11 +25,11 @@ func main() {
 	infof("%s", cfg.MQTT)
 	infof(
 		"http=%s database=%s subscribe=%s command=%s",
-		cfg.Host, cfg.DatabasePath, cfg.SubscribedTopic, cfg.CommandTopic,
+		cfg.Host, cfg.Database, cfg.SubscribedTopic, cfg.CommandTopic,
 	)
 
 	startedAtEpochMs := nowEpochMs()
-	db, err := openDatabase(cfg.DatabasePath)
+	db, err := openDatabase(cfg.Database.URL, cfg.Database.Token)
 	if err != nil {
 		errorf("database error: %v", err)
 		os.Exit(1)

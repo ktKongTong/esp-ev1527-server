@@ -50,11 +50,25 @@ func (c mqttConfig) String() string {
 	)
 }
 
+type databaseConfig struct {
+	URL   string
+	Token string
+}
+
+// String redacts the auth token so config values can be logged.
+func (c databaseConfig) String() string {
+	token := "<none>"
+	if c.Token != "" {
+		token = "***"
+	}
+	return fmt.Sprintf("DatabaseConfig(url=%s, authToken=%s)", c.URL, token)
+}
+
 type config struct {
 	Host            string
 	Port            int
 	MQTT            mqttConfig
-	DatabasePath    string
+	Database        databaseConfig
 	GatewayClientID string
 	CommandTopic    string
 	SubscribedTopic string
@@ -138,9 +152,14 @@ func loadConfig() (config, error) {
 		host = "0.0.0.0"
 	}
 
-	databasePath := setting("DATABASE_PATH")
-	if databasePath == "" {
-		databasePath = "esp32-control.db"
+	databaseURL := strings.TrimSpace(setting("TURSO_DATABASE_URL"))
+	if databaseURL == "" {
+		databaseURL = strings.TrimSpace(setting("DATABASE_URL"))
+	}
+	if databaseURL == "" {
+		return config{}, fmt.Errorf(
+			"TURSO_DATABASE_URL is required (DATABASE_URL is accepted as an alias)",
+		)
 	}
 	gatewayClientID := setting("GATEWAY_CLIENT_ID")
 	if gatewayClientID == "" {
@@ -162,7 +181,10 @@ func loadConfig() (config, error) {
 			WebSocketPath:    defaultString(setting("MQTT_WS_PATH"), "/mqtt"),
 			UseTLS:           useTLS,
 		},
-		DatabasePath:    databasePath,
+		Database: databaseConfig{
+			URL:   databaseURL,
+			Token: strings.TrimSpace(setting("TURSO_AUTH_TOKEN")),
+		},
 		GatewayClientID: gatewayClientID,
 		CommandTopic:    topicPrefix + "/commands/MQTTto433",
 		SubscribedTopic: topicPrefix + "/#",
@@ -177,9 +199,10 @@ func defaultString(value, fallback string) string {
 	return value
 }
 
-// loadConfigFile implements the same precedence as the Kotlin server:
-// CONFIG_FILE, then .env, then server/.env. The extra go-server/.env path lets
-// this module run from its own directory without sharing the repository root.
+// loadConfigFile resolves CONFIG_FILE, then the first existing file among
+// .env, go-server/.env, and the legacy server/.env. The go-server/.env path
+// lets this module run from its own directory; server/.env is kept so existing
+// local setups keep working after the Ktor server was removed.
 func loadConfigFile() (map[string]string, error) {
 	if path := strings.TrimSpace(os.Getenv("CONFIG_FILE")); path != "" {
 		values, ok, err := readConfigFile(path)

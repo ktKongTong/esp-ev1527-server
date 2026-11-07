@@ -20,11 +20,8 @@ kotlin {
         withHostTest {}
     }
 
-    linuxX64()
-    linuxArm64()
-
-    // Declared on all hosts; enabled only when the host can build Apple targets.
-    macosArm64()
+    // The Ktor/Native server was removed, so the contract is consumed by the
+    // Android and Wasm clients only.
 
     @OptIn(ExperimentalWasmDsl::class)
     wasmJs {

@@ -9,7 +9,7 @@
 
 1. **项目内已有实现**：同包/同层的函数、类型、模块、工具、配置封装。
 2. **项目内已有依赖**：`gradle/libs.versions.toml`、各模块 `build.gradle.kts`、
-   `mock/go.mod` 及 lockfile 中已经引入的库是否具备该能力。
+   `go-server/go.mod`、`mock/go.mod` 及 lockfile 中已经引入的库是否具备该能力。
 3. **标准库与运行时内置能力**：Kotlin 标准库、kotlinx.coroutines、
    kotlinx.serialization、Ktor、Compose、Go 标准库等。
 4. **成熟第三方库**：通过第 2.1 节的验收条件后再引入。
@@ -18,57 +18,52 @@
 
 ```bash
 # 项目内先搜能力关键词、函数名、类型名
-rg -n "关键词|capability" contract server shared androidApp webApp mock
+rg -n "关键词|capability" contract go-server shared androidApp webApp mock
 
 # 检查已有依赖，不要先改 build 文件
 rg -n "所需能力|库名" gradle/libs.versions.toml
 rg -n "implementation|api|alias" --glob '*.gradle.kts' .
-rg -n "require|replace" mock/go.mod
+rg -n "require|replace" go-server/go.mod mock/go.mod
 ```
 
 ### 1.2 各模块的既有能力
 
 | 能力 | 既有位置 | 复用要求 |
 | --- | --- | --- |
-| 跨端 DTO、枚举、错误信封 | `contract/` | 新增协议类型只放这里，禁止在 `server`、`shared` 各写一份 |
-| JSON 配置 | `ContractJson` | 统一使用，不新建第二套 `Json {}` |
-| 设备/命令/学习状态机 | `server/.../domain/` | 扩展对应领域服务；不在路由或客户端复制状态机，不重新合并成 God object |
-| 持久化 | `server/.../db/` + `server/.../data/` | Room3 entity/DAO 与仓储；领域服务不直接拼 SQL，不引入第二套 ORM |
-| MQTT 连接与发布 | `server/.../mqtt/MqttTransport.kt`（ktor-mqtt 1.2.2 薄适配层） | 扩展适配层；MQTT 协议、keepalive、QoS 1、订阅由 ktor-mqtt 负责，禁止再写第二套 MQTT 客户端 |
+| 跨端 DTO、枚举、错误信封 | `contract/`（Kotlin 客户端）+ `go-server/contract.go`（Go 镜像） | 新增协议类型同时更新两处；禁止在 `shared` 再定义一份 |
+| JSON 配置 | `ContractJson`（Kotlin）+ `encoding/json`（Go） | 各自使用现有配置，不新建第二套序列化层 |
+| 设备/命令/学习状态机 | `go-server/devices.go`、`commands.go`、`learning.go` | 扩展对应领域服务；不在 HTTP 路由或客户端复制状态机，不重新合并成 God object |
+| 持久化 | `go-server/store.go` + `go-server/repositories.go` | GORM row 模型与仓储；领域服务不直接拼 SQL，不引入第二套 ORM |
+| MQTT 连接与发布 | `go-server/mqtt.go` + `go-server/gateway.go`（paho.mqtt.golang） | 扩展适配层；MQTT 协议、keepalive、QoS 1、订阅由 paho 负责，禁止再写第二套 MQTT 客户端 |
 | 状态同步 | `shared/.../api/Esp32Api.kt` + `shared/.../App.kt` | v1.2.0 使用轮询；不新增事件流或客户端第二套状态机 |
 | 网关/设备/学习 UI | `shared/.../App.kt` | 复用现有页面、轮询与错误文案 |
 | OpenMQTTGateway 仿真 | `mock/` | 复用现有 CLI/HTTP 控制与 paho 客户端 |
 
 ### 1.3 已确定的复用决策
 
-- **MQTT**：使用 Apache-2.0 的 `dev.koft.ktor-mqtt:mqtt-client:1.2.2`
-  （上游 `ktKongTong/ktor-mqtt`），支持 MQTT 5、QoS 1、订阅与 keepalive。
-  `MqttTransport.kt` 只保留库未提供的行为：断线重连、Broker 断开时异常隔离、
-  主题过滤和 `ByteArray` ↔ `ByteString` 边界转换。
-- **MQTT TLS**：Ktor Native 没有裸 TLS socket（`ktor-network-tls` 的
-  `openTLSSession` 直接 `error`）。需要 TLS 时使用 MQTT over WebSocket
-  Secure（`MQTT_TRANSPORT=websocket`、`MQTT_TLS=true`），传输由 Ktor
-  Curl 引擎完成；其 klib 自带静态 libcurl + OpenSSL。fork 未发布
-  `mqtt-client-ws`，`WebSocketMqttEngine` 只保留 WebSocket 帧循环，
-  MQTT 分帧仍复用 ktor-mqtt 的 `readPacket` / `write`。禁止恢复外部
-  TLS 代理脚本，也禁止在 TCP 模式下打开 `tls {}`。
+- **服务端**：Ktor/Kotlin Native 服务端已于 2026-11-07 移除；`go-server`
+  （Go 1.26 + Echo + GORM）是唯一实现。不要恢复 `:server` 模块或第二套服务端。
+- **MQTT**：使用 `eclipse/paho.mqtt.golang` v1.5.1，MQTT 3.1.1、QoS 1、
+  keepalive 与自动重连由 paho 负责。`mqtt.go` 只保留连接/断开回调、主题过滤
+  和消息分发，不复制 MQTT 协议实现。
+- **MQTT TLS**：需要 TLS 时使用 MQTT over WebSocket Secure
+  （`MQTT_TRANSPORT=websocket`、`MQTT_TLS=true`），传输由 paho 的 WebSocket
+  客户端完成。配置层拒绝 `MQTT_TRANSPORT=tcp` + `MQTT_TLS=true`，与网关契约
+  保持一致；不要恢复外部 TLS 代理脚本。
 - **MQTT 为必需配置**：未设置 `MQTT_HOST` 时服务端拒绝启动；不实现
-  `UnavailableRfTransmitter` 之类的无网关降级路径。配置可按
-  `环境变量 → CONFIG_FILE → .env → server/.env` 读取，环境变量优先。
-- **平台**：`server` 声明 `linuxArm64`（部署）、`linuxX64` 与 `macosArm64`
-  （本地运行与 IDE 调试）；ktor-mqtt 1.2.2 同时发布 Linux 与 macOS 变体。
-  MQTT 依赖统一放在 `nativeMain`，因为 `nativeMain` 源码直接导入其类型；
-  放到各目标 source set 会导致共享源集和 IDE 无法解析。Apple 目标在非
-  macOS 主机上由 Kotlin 自动禁用。
-- **未采用 DitchOoM MQTT**：其 Linux 实现依赖 io_uring；Docker 默认 seccomp
-  返回 `Operation not permitted`，运行即崩溃。放宽容器 seccomp 的代价高于收益。
-- **未采用 Meshtastic MQTT**：许可证为 GPL-3.0，与仓库分发约束不匹配。
-- **持久化**：SQLite + Room3（`room3-runtime` / `room3-compiler` /
-  `sqlite-bundled`），按 `docs/server.md` 的技术栈要求；不使用第二套 ORM。
+  `UnavailableRfTransmitter` 之类的无网关降级路径。配置按
+  `环境变量 → CONFIG_FILE → .env → go-server/.env → server/.env（legacy）`
+  读取，环境变量优先。
+- **持久化**：Turso Cloud + GORM。`turso.tech/database/tursogo-serverless`
+  提供纯 Go 远程连接，`gorm.io/driver/sqlite` 通过 `Config{Conn}` 复用
+  SQLite 方言与 `AutoMigrate`；不打开本地数据库文件，不使用第二套 ORM。
+  `TURSO_DATABASE_URL` 必填，`DATABASE_URL` 是别名，`TURSO_AUTH_TOKEN` 用于
+  Turso Cloud。GORM sqlite dialector 导入 `mattn/go-sqlite3`，构建需要 CGO。
 - **状态同步**：v1.2.0 不提供 SSE；客户端按契约周期轮询快照。
-- **时间**：使用 Kotlin 标准库 `kotlin.time.Clock`，不直接调用 POSIX 时间 API。
-- **JSON / HTTP / CORS / 错误映射**：分别复用 `ContractJson`、Ktor 客户端、
-  Ktor CORS 与 StatusPages；不手写协议帧或第二套 JSON 配置。
+- **时间**：Go 使用标准库 `time.Now().UnixMilli()`（`go-server/util.go`）。
+- **JSON / HTTP / CORS / 错误映射**：Kotlin 客户端复用 `ContractJson`；
+  Go 服务端复用 `encoding/json`、Echo CORS 与 `http.go` 的统一错误信封；
+  不手写协议帧或新建第二套 JSON 配置。
 
 完整逐项审阅记录见 [`docs/reuse-audit.md`](docs/reuse-audit.md)。
 
@@ -85,12 +80,16 @@ rg -n "require|replace" mock/go.mod
 ## 2. 依赖与平台约束
 
 - 新依赖统一登记在 `gradle/libs.versions.toml`，模块中通过 `libs.*` 引用。
-- `commonMain` 依赖必须同时支持 Android、`linuxArm64`、`macosArm64`、`wasmJs`；
-  仅 Android/Web 可用的库放到对应 source set。
+- `commonMain` 依赖必须同时支持 Android 与 `wasmJs`；仅 Android/Web 可用的库
+  放到对应 source set。Ktor/Native 服务端移除后，`contract` 不再声明
+  Linux/macOS 目标。
 - 不把 Ktor、Compose、MQTT 或 UI 依赖放进 `contract`。
-- `contract` 的 `commonMain` 只依赖序列化库，保持可被服务端和客户端共同消费。
+- `contract` 的 `commonMain` 只依赖序列化库；Go 服务端通过
+  `go-server/contract.go` 镜像同一协议，字段与枚举必须与 `contract` 一致。
 - Web 端注意 WasmGC、包体积与浏览器兼容性；不要引入 JVM-only 依赖。
 - Android 端保持 minSdk 26 / compileSdk 35 的现有约束。
+- `go-server` 是独立 Go 模块，优先使用标准库和 `go.mod` 中已有依赖；
+  生产数据库访问走 Turso 驱动，不要引入本地 SQLite 文件路径。
 - `mock` 是独立 Go 模块，优先使用标准库和 `go.mod` 中已有依赖。
 
 ### 2.1 引入/复用库的验收条件
@@ -132,7 +131,7 @@ New implementation scope: <what is genuinely new>
 - **隐式 fork**：复制代码进仓库但不标注来源与维护归属。
 - **为复用而滥用抽象**：新增不必要的间接层来“统一”两个本不该统一的实现。
 - 在 UI 中重复服务端状态机、在客户端重复校验协议、在 `shared` 重复
-  `contract` 类型。
+  `contract` 类型，或在 `go-server/contract.go` 之外再定义一套协议类型。
 
 ## 6. Linear 同步
 
@@ -165,16 +164,17 @@ Linear 项目是仓库文档与任务状态的对外镜像；本地文件是内�
 - [ ] 新增依赖已通过第 2.1 节验收，并记录为何不自研。
 - [ ] 自研部分已通过第 4 节校验，理由已写入。
 - [ ] 复用处的适配层存在，核心逻辑未直接耦合库内部 API。
-- [ ] `contract` 仍是协议的唯一来源，服务端与客户端没有重复 DTO。
+- [ ] `contract` 与 `go-server/contract.go` 的协议字段一致，Kotlin 客户端与
+  Go 服务端没有各自新增一份 DTO。
 - [ ] 本次涉及的文档与 issue 已同步到 Linear，并附上 Linear 链接。
 - [ ] 构建与测试通过：
 
 ```bash
 ./gradlew :contract:testAndroidHostTest \
-  :server:linkDebugExecutableLinuxArm64 \
   :shared:compileKotlinWasmJs \
   :androidApp:assembleDebug \
   :webApp:wasmJsBrowserDistribution
 
-cd mock && go test ./...
+(cd go-server && CGO_ENABLED=1 go test ./...)
+(cd mock && go test ./...)
 ```

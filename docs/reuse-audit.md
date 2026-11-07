@@ -1,7 +1,12 @@
 # 复用审计记录
 
+> 历史说明（2026-11-07）：本审计记录的是已移除的 Ktor/Kotlin Native 服务端。
+> 该服务端已于 2026-11-07 删除；当前服务端为 `go-server`（Go + Echo + GORM +
+> Turso Cloud）。下文所有 `server/...` 行仅作历史保留，新的迁移选型见第 7 节。
+
 审计日期：2026-11-03。范围：仓库内所有运行时实现与依赖。
-本地文件：`docs/reuse-audit.md`；本版实现为 contract v1.2.0 迁移（未提交）。
+本地文件：`docs/reuse-audit.md`；本记录涵盖 contract v1.2.0 迁移与
+2026-11-07 的 Go/Turso 迁移。
 判定顺序遵循仓库根目录 `AGENTS.md` 第 1 节：项目内实现 → 已有依赖 →
 标准库/运行时 → 成熟第三方库。
 
@@ -168,3 +173,61 @@ v1.2.0 不提供事件流，客户端用 HTTP 轮询刷新快照。
 - Broker 停止时进程存活，恢复后自动重连。
 
 未执行：EMQX 特定行为、多网关隔离、Android/Web UI 与新服务端的联调。
+
+## 7. 2026-11-07 服务端迁移：Go + Turso Cloud
+
+Ktor/Kotlin Native 服务端被移除，`go-server` 成为唯一服务端实现。持久化从
+本地 SQLite 文件（GORM + `gorm.io/driver/sqlite`）切换到 Turso Cloud。
+HTTP 契约、MQTT 协议、状态机与表结构不变。
+
+### 7.1 复用
+
+| 能力 | 复用 | 说明 |
+| --- | --- | --- |
+| HTTP | `github.com/labstack/echo/v4` v4.16.3 | 已在 `go-server` 中使用，不新增路由框架 |
+| ORM / 迁移 | `gorm.io/gorm` v1.31.2 + `gorm.io/driver/sqlite` v1.6.0 | 通过 `Config{Conn}` 复用 SQLite 方言与 `AutoMigrate` |
+| MQTT | `github.com/eclipse/paho.mqtt.golang` v1.5.1 | 已在 `go-server` 中使用 |
+| JSON / 时间 / ID | Go 标准库 + 现有 `contract.go` | 不新增协议层或 DTO 生成器 |
+| 测试数据库 | mattn `:memory:` | 与生产共用同一 GORM dialector |
+
+### 7.2 新增依赖
+
+`turso.tech/database/tursogo-serverless`，固定到
+`v0.0.0-20261107095519-8e7eac038f1f`（2026-11-07）。
+
+- 官方 Turso Cloud serverless 驱动，纯 Go，无 CGO。
+- 支持 `libsql://` / `turso://` / `https://` 与本地 sqld 的 `http://`。
+- 通过 `Authorization: Bearer <token>` 携带 `TURSO_AUTH_TOKEN`。
+- 尚未发布 tagged release，因此使用伪版本并在 `go-server/README.md`
+  记录升级检查点。
+
+### 7.3 未采用
+
+| 方案 | 原因 |
+| --- | --- |
+| `go-libsql` + `gorm.io/driver/sqlite` | 两者各自链接一份 C SQLite，链接期出现大量 duplicate symbols；不能在同一二进制中混用 |
+| `bryanvaz/gorm-libsql` + `go-libsql` | 可用，但 dialector 自 2024-10 起无更新，不满足维护活跃要求 |
+| `morelj/gorm-sqlite-libsql` + `libsql-client-go` | 底层 `libsql-client-go` 已标记 deprecated；不再作为新选型 |
+| `tursogo`（embedded） | 仅支持本地/同步数据库，不满足“Turso Cloud 远程”的选择 |
+| 保留本地 SQLite 文件 | 用户明确要求远程 Turso；容器不再挂载数据库卷 |
+| 自研 Turso HTTP 协议客户端 | 驱动是官方维护的薄封装，自研会重复协议与认证逻辑 |
+
+`gorm.io/driver/sqlite` 仍导入 `mattn/go-sqlite3`，所以 Docker 构建保留 CGO；
+生产运行时实际使用纯 Go 的 Turso 驱动，mattn 只服务于测试与 dialector 导入。
+
+### 7.4 验证
+
+- `gofmt -w *.go`、`go vet ./...`、`CGO_ENABLED=1 go test ./...`：
+  65 个测试通过（使用 `:memory:`，不访问 Turso）。
+- 本地 sqld（`http://127.0.0.1:18080`）联调：`AutoMigrate` 成功，
+  `GET /api/v1/health` 返回 `status=ok`，`GET /api/v1/devices` 返回空列表；
+  `TURSO_AUTH_TOKEN` 在日志中显示为 `***`。
+- Ktor 模块移除后重新执行 Gradle：
+  `:contract:testAndroidHostTest`、`:shared:compileKotlinWasmJs`、
+  `:androidApp:assembleDebug`、`:webApp:wasmJsBrowserDistribution` 均通过。
+- `mock/`：21 个测试通过。
+- `go-server/Dockerfile` 构建成功；容器以非 root 用户启动，通过
+  `host.docker.internal` 连接本地 sqld，健康检查返回 `status=ok`。
+- 未执行：真实 Turso Cloud 实例、真实网关端到端、Android/Web UI 联调。
+  旧 Ktor 服务端的 `server/esp32-control.db` 未自动导入，因为当前环境没有
+  Turso Cloud 凭据；需要时用 Turso CLI 或 SQL 手工迁移。

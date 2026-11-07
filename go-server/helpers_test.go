@@ -10,7 +10,7 @@ import (
 
 func newTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	db, err := openDatabase(":memory:")
+	db, err := openDatabase(":memory:", "")
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}

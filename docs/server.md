@@ -1,40 +1,55 @@
-该文档定义 server 的一些能力和实现思路
+该文档定义 server 的能力、技术栈与实现状态。
 
 ## 功能需求
-server 作为客户端和网关沟通的中间节点，需要完成以下内容，。
-1. 负责与 mqtt server 进行沟通，将网关状态、系统状态进行
-2. 基本设备的生命周期管理。设备的新增、删除、控制等
+
+server 作为客户端和网关沟通的中间节点，需要完成以下内容：
+
+1. 负责与 MQTT server 通信，维护网关状态与系统状态。
+2. 基本设备的生命周期管理：新增、删除、控制、编辑。
 
 ## 技术栈
-1. 数据应该做好持久化，采用 sqlite 存储，ORM 框架采用 Room3。
-2. mqtt-client 使用 ktor-mqtt
+
+1. 持久化使用 Turso Cloud（SQLite 兼容），ORM 使用 GORM。
+2. MQTT 客户端使用 `eclipse/paho.mqtt.golang`。
+3. HTTP 使用 Echo。
 
 ## 实现状态
 
-- SQLite：`androidx.sqlite:sqlite-bundled:2.7.1` + `BundledSQLiteDriver`。
-- ORM：`androidx.room3` 3.0.3，KSP 生成 DAO，schema 位于 `server/schemas/`。
-- MQTT：`dev.koft.ktor-mqtt:mqtt-client:1.2.2`（MQTT 5），支持
-  `linuxArm64` / `linuxX64` / `macosArm64`。重连由 `mqtt/MqttTransport.kt` 负责。
-  MQTT 是必需配置：未设置 `MQTT_HOST` 时启动失败，没有本地降级模式。
-  配置读取顺序为环境变量 → `CONFIG_FILE` → `.env` → `server/.env`。
-- 平台：`linuxArm64` 用于部署；`macosArm64` 用于本地运行与 IDE 调试。
-  MQTT 依赖声明在 `nativeMain`，共享源集与 IDE 才能解析其类型。
-- TLS：Ktor Native 未实现裸 TLS socket。托管 Broker 只开放 TLS 时，使用
-  MQTT over WebSocket Secure：`MQTT_TRANSPORT=websocket`、`MQTT_TLS=true`，
-  端口与路径按 Broker 的 WSS 监听器配置（EMQX Cloud 为 8084 + `/mqtt`）。
-  传输由 Ktor Curl 引擎完成，其 klib 自带静态 libcurl + OpenSSL；
-  `WebSocketMqttEngine` 只搬运字节，MQTT 分帧仍由 ktor-mqtt 负责。
-- 裸 TCP 不支持 `MQTT_TLS=true`：启动时直接报错，避免出现 TLS 会话异步失败
-  导致的 CONNACK 超时。
-- 结构：`Main.kt` 为组合根；领域逻辑在 `domain/`，持久化在 `db/` + `data/`，
-  HTTP 在 `routes/`。不再有 `ControlPlane`。
+- 服务端：`go-server/`，Go 1.26+。GORM 的 sqlite dialector 导入
+  `mattn/go-sqlite3`，因此构建需要 `CGO_ENABLED=1`；生产数据库访问走纯 Go 的
+  Turso serverless 驱动，不打开本地 SQLite 文件。
+- 数据库：`turso.tech/database/tursogo-serverless`，通过
+  `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` 连接 Turso Cloud。
+  `DATABASE_URL` 是 `TURSO_DATABASE_URL` 的别名。启动时执行 GORM
+  `AutoMigrate`。
+- 表：`devices`、`device_tombstones`、`idempotency`。列名保持 camelCase，
+  与上一版服务端的表结构兼容。
+- MQTT：paho 提供 MQTT 3.1.1、QoS 1、keepalive 与自动重连。MQTT 是必需配置：
+  未设置 `MQTT_HOST` 时启动失败，没有本地降级模式。
+- 配置读取顺序为环境变量 → `CONFIG_FILE` → `.env` → `go-server/.env` →
+  `server/.env`（legacy）。环境变量优先。
+- TLS：网关契约未定义裸 TCP TLS。托管 Broker 只开放 TLS 时，使用 MQTT over
+  WebSocket Secure：`MQTT_TRANSPORT=websocket`、`MQTT_TLS=true`，端口与路径
+  按 Broker 的 WSS 监听器配置（EMQX Cloud 为 8084 + `/mqtt`）。
+  `MQTT_TLS=true` 不能与 `MQTT_TRANSPORT=tcp` 组合，启动时直接报错。
+- 结构：`main.go` 为组合根；HTTP 在 `http.go`，领域逻辑在 `devices.go` /
+  `commands.go` / `learning.go`，持久化在 `repositories.go` + `store.go`，
+  MQTT 在 `mqtt.go` / `gateway.go`。
 - 状态同步：v1.2.0 不提供 SSE；客户端轮询快照。
 
-实现细节与表结构见
+接口、状态机与数据流的完整定义见
 [`docs/api-contract-v1.md`](api-contract-v1.md) 第 3.4、3.5 节。
 
-DB
-1. gateway instance(device id)。
-2. server。
+## 运行时状态
 
-// 内存中维护一些设备 list
+- 网关在线状态与接收器证据不持久化；服务端重启后先按 unknown 处理，
+  由 retained LWT/version 恢复。
+- 学习会话与候选只存在于服务端内存。重启后未保存的会话全部丢失，客户端轮询
+  得到 `404 learning_session_not_found`，需要重新开始；已确认的设备不受影响。
+- 幂等记录在发布前预留；发布成功后写入 `dispatchedAtEpochMs`，发布失败则删除，
+  允许客户端重试。重启不重发任何命令。
+
+## 历史
+
+Ktor/Kotlin Native 服务端（原 `server/`）已于 2026-11-07 移除。本文件原先的
+Room3、ktor-mqtt、Kotlin/Native 部署说明仅适用于该实现，不再维护。

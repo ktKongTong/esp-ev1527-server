@@ -1,16 +1,17 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
-	"strings"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
+	turso "turso.tech/database/tursogo-serverless"
 )
 
-// The GORM models keep the Room column names so an existing server database
-// can be opened without a migration step.
+// The GORM models keep the existing table and column names so a database
+// created by the previous server can be opened without a migration step.
 type deviceRow struct {
 	ID               string `gorm:"column:id;primaryKey"`
 	Name             string `gorm:"column:name"`
@@ -42,31 +43,37 @@ type idempotencyRow struct {
 
 func (idempotencyRow) TableName() string { return "idempotency" }
 
-func openDatabase(path string) (*gorm.DB, error) {
-	dsn := path
-	if path != ":memory:" && !strings.HasPrefix(path, "file:") {
-		dsn = fmt.Sprintf("file:%s?_busy_timeout=5000&_journal_mode=WAL", path)
+// openDatabase connects GORM to Turso. The GORM sqlite dialector supplies the
+// SQLite SQL and migration behavior; it runs on the connection provided by the
+// pure-Go Turso serverless driver instead of opening a local database file.
+//
+// The ":memory:" branch is reserved for tests. It uses mattn/go-sqlite3 through
+// the same dialector, so tests exercise the same SQL dialect as production.
+func openDatabase(databaseURL, authToken string) (*gorm.DB, error) {
+	var sqlDB *sql.DB
+	if databaseURL == ":memory:" {
+		var err error
+		sqlDB, err = sql.Open("sqlite3", ":memory:")
+		if err != nil {
+			return nil, fmt.Errorf("open test sqlite: %w", err)
+		}
+		// A single connection keeps the in-memory database alive for the whole
+		// test and serializes writers.
+		sqlDB.SetMaxOpenConns(1)
+	} else {
+		sqlDB = sql.OpenDB(turso.NewConnector(databaseURL, authToken))
 	}
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
+
+	db, err := gorm.Open(sqlite.New(sqlite.Config{Conn: sqlDB}), &gorm.Config{
 		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite %s: %w", path, err)
-	}
-	sqlDB, err := db.DB()
-	if err != nil {
-		return nil, fmt.Errorf("sqlite handle: %w", err)
-	}
-	// One writer at a time keeps SQLite transactions serialized and avoids
-	// SQLITE_BUSY under the low request rate this server handles.
-	sqlDB.SetMaxOpenConns(1)
-	if path != ":memory:" {
-		if err := db.Exec("PRAGMA busy_timeout = 5000").Error; err != nil {
-			return nil, fmt.Errorf("sqlite busy_timeout: %w", err)
-		}
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("open turso database: %w", err)
 	}
 	if err := db.AutoMigrate(&deviceRow{}, &deviceTombstoneRow{}, &idempotencyRow{}); err != nil {
-		return nil, fmt.Errorf("migrate sqlite: %w", err)
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("migrate turso database: %w", err)
 	}
 	return db, nil
 }

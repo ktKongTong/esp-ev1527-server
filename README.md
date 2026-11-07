@@ -1,9 +1,9 @@
-# ESP32 智能控制台 · Kotlin 全栈
+# ESP32 智能控制台 · Kotlin 客户端 + Go 服务端
 
-Android + Web 共用一套 Compose UI，Kotlin/Native 服务端通过 MQTT 驱动
+Android + Web 共用一套 Compose UI，Go 服务端通过 MQTT 驱动
 OpenMQTTGateway 315MHz 网关，实现**控制开关、学习新设备、编辑设备信息、移除旧设备**。
-服务端、Android、Web 三端共享 `contract` 模块中的 HTTP 协议类型，
-避免各端维护同名模型。
+Android/Web 共享 `contract` 模块中的 HTTP 协议类型；Go 服务端在
+`go-server/contract.go` 中镜像同一协议，避免客户端各自维护同名模型。
 
 当前仓库已实现契约 v2.1.0；协议与状态机的完整定义见
 [`docs/api-contract-v1.md`](docs/api-contract-v1.md)。仓库内的
@@ -20,7 +20,7 @@ OpenMQTTGateway 315MHz 网关，实现**控制开关、学习新设备、编辑�
   编辑不发送 MQTT，也不改变设备生命周期。
 - **移除设备**：立即拒绝新命令、阻止未发布的发布动作、释放开/关码、写入 tombstone；
   重复删除保持幂等。
-- **持久化**：设备、幂等 key 和 tombstone 保存在 SQLite（Room3 ORM），
+- **持久化**：设备、幂等 key 和 tombstone 保存在 Turso Cloud（GORM），
   服务端重启不丢失；学习会话只存在于内存，重启后需重新开始。
 - **无状态设备**：315MHz 链路没有回执，服务端只保存遥控器的开/关码，
   不推断设备状态，也不保存命令历史。
@@ -32,16 +32,18 @@ OpenMQTTGateway 315MHz 网关，实现**控制开关、学习新设备、编辑�
 ## 架构
 
 ```
-┌──────────┐    HTTP/JSON      ┌──────────────┐  MQTT 5 / 3.1.1 ┌───────────┐  315MHz  ┌────────┐
-│ Android  │ ◄───────────────► │    Server    │ ◄──────────────► │  Gateway  │ ◄──────► │ Remote │
-│   Web    │                   │ Kotlin/Native│                  │   ESP32   │          │ Button │
-└──────────┘                   └──────────────┘                  └───────────┘          └────────┘
+┌──────────┐    HTTP/JSON      ┌──────────────┐  MQTT 3.1.1  ┌───────────┐  315MHz  ┌────────┐
+│ Android  │ ◄───────────────► │    Server    │ ◄───────────► │  Gateway  │ ◄──────► │ Remote │
+│   Web    │                   │  Go + Echo   │               │   ESP32   │          │ Button │
+└──────────┘                   └──────┬───────┘               └───────────┘          └────────┘
       │                               │
       └──────── contract ─────────────┘
+                                      ▼
+                                Turso Cloud
 ```
 
-服务端内部：Ktor 路由 → 领域服务（设备/命令/学习）→ 仓储 → Room3 DAO → SQLite；
-MQTT 摄入由 `GatewayIngest` 分发给学习状态机。`Main.kt` 只负责组装。
+服务端内部：Echo 路由 → 领域服务（设备/命令/学习）→ 仓储 → GORM → Turso；
+MQTT 摄入由 `gatewayIngest` 分发给学习状态机。`main.go` 只负责组装。
 
 - 服务端是设备、命令、学习会话状态的唯一权威。
 - 网关负责 MQTT 桥接与 315MHz 收发；服务端订阅主题前缀下的全部消息，
@@ -54,7 +56,7 @@ MQTT 摄入由 `GatewayIngest` 分发给学习状态机。`Main.kt` 只负责组
 ```
 esp32/
 ├── contract/        KMP 共享协议：DTO、ContractJson、枚举
-├── server/          Ktor 3 + Kotlin/Native（linuxArm64、macOS 本地调试）+ ktor-mqtt + Room3/SQLite
+├── go-server/       Go + Echo + GORM + Turso Cloud + paho MQTT
 ├── shared/          Compose Multiplatform UI 与 Ktor 客户端（Android + Wasm）
 ├── androidApp/      Android 应用壳（Material You 动态取色）
 ├── webApp/          Kotlin/Wasm Web 应用与 index.html
@@ -73,15 +75,17 @@ esp32/
 
 | 组件 | 版本 | 说明 |
 | --- | --- | --- |
-| Kotlin | 2.4.21 | 服务端、Android、Wasm 共用 |
+| Kotlin | 2.4.21 | Android、Wasm 共用 |
 | Compose Multiplatform | 1.10.0 | 1.12.x 要求 compileSdk 37 与 AGP 9.1+ |
 | Compose Material3 | 1.9.0 | 对应 AndroidX Material3 1.4.0 |
 | Android Gradle Plugin | 9.4.1 | 要求 Gradle 9.6.0+、Build Tools 36.0.0；compileSdk / targetSdk 35，minSdk 26 |
 | Gradle | 9.6.1 | Wrapper 已包含 |
 | JDK | 17 | 编译与 Gradle 运行 |
-| Ktor | 3.6.1 | 服务端 CIO；客户端 Android 用 CIO，Web 用 Js/fetch |
-| MQTT | `dev.koft.ktor-mqtt` 1.2.2 | MQTT 5 客户端；同时发布 Linux 与 macOS 变体 |
-| 持久化 | Room3 3.0.3 + SQLite 2.7.1 | `room3-runtime` / KSP；`sqlite-bundled` 驱动，无宿主机依赖 |
+| Ktor | 3.6.1 | 仅客户端：Android 用 CIO，Web 用 Js/fetch |
+| Go | 1.26+ | 服务端；GORM sqlite dialector 需要 CGO |
+| Echo | 4.16.3 | Go 服务端 HTTP 路由、CORS、错误映射 |
+| MQTT | `eclipse/paho.mqtt.golang` 1.5.1 | MQTT 3.1.1 客户端，QoS 1 与自动重连 |
+| 持久化 | GORM 1.31.2 + Turso Cloud | `gorm.io/driver/sqlite` 通过 `Config{Conn}` 跑在纯 Go 的 Turso 驱动上 |
 | Kotlin/Wasm | 2.4.21 | 浏览器端使用 WasmGC |
 | EMQX | 5.8.7 | 仅测试栈使用，可替换为任意 MQTT 3.1.1 Broker |
 
@@ -89,7 +93,8 @@ esp32/
 
 - JDK 17
 - Android SDK Platform 35 与 **Build Tools 36.0.0**
-- Docker（运行 Linux/arm64 服务端与 mock/EMQX 测试栈）
+- Go 1.26+ 与 C 工具链（构建 `go-server` 时 CGO 需要）
+- Docker（运行 Go 服务端镜像与 mock/EMQX 测试栈）
 - 支持 WasmGC 的浏览器：Chrome/Edge 119+、Firefox 120+、Safari 18.2+
 - Node 仅在构建/测试 Web 产物时需要，Gradle 会按需下载
 
@@ -117,18 +122,14 @@ docker compose -f docker-compose.yml -f docker-compose.emqx.yml logs -f mock
 
 ### 2. 启动服务端（MQTT 模式）
 
-```bash
-export JAVA_HOME="/path/to/jdk-17"  # 指向 JDK 17 安装目录
-./gradlew :server:linkDebugExecutableLinuxArm64
+服务端需要 Turso Cloud 数据库和 MQTT Broker：
 
-docker run --rm --name esp32-server \
-  --platform linux/arm64 \
-  --network mock_default \
-  -p 8080:8080 \
-  -e MQTT_HOST=emqx -e MQTT_PORT=1883 \
-  -e SERVER_HOST=0.0.0.0 \
-  -v "$PWD/server/build/bin/linuxArm64/debugExecutable/esp32-control-server.kexe:/app/server:ro" \
-  debian:bookworm-slim /app/server
+```bash
+cd go-server
+TURSO_DATABASE_URL='libsql://<db>-<org>.turso.io' \
+TURSO_AUTH_TOKEN='<token>' \
+MQTT_HOST=127.0.0.1 MQTT_PORT=1883 \
+CGO_ENABLED=1 go run .
 ```
 
 健康检查：
@@ -138,33 +139,35 @@ curl -s http://127.0.0.1:8080/api/v1/health | jq
 # gateway.state 应为 "online"
 ```
 
-MQTT 是必需配置：未设置 `MQTT_HOST` 时服务端拒绝启动，不提供无网关的降级模式。
+MQTT 与 Turso 都是必需配置：未设置 `MQTT_HOST` 或
+`TURSO_DATABASE_URL` 时服务端拒绝启动，不提供无网关或无数据库的降级模式。
+`DATABASE_URL` 可作为 `TURSO_DATABASE_URL` 的别名。
 
-本地在 macOS 上运行或从 IDE 调试时，可读取 `.env` 文件：
+本地可用 `.env` 文件：
 
 ```bash
-cp server/.env.example server/.env   # 填入 MQTT_HOST、MQTT_USERNAME、MQTT_PASSWORD
-./gradlew :server:linkDebugExecutableMacosArm64
-./server/build/bin/macosArm64/debugExecutable/esp32-control-server.kexe
+cp go-server/.env.example go-server/.env
+# 填入 MQTT_HOST、TURSO_DATABASE_URL、TURSO_AUTH_TOKEN、MQTT_USERNAME、MQTT_PASSWORD
+(cd go-server && CGO_ENABLED=1 go run .)
 ```
 
 服务端按以下顺序读取配置：进程环境变量 → `CONFIG_FILE` 指定的文件 →
-当前目录 `.env` → `server/.env`。同名环境变量优先于文件，容器部署行为不变。
-`server/.env` 已被 gitignore，不要提交凭据。
+当前目录 `.env` → `go-server/.env` → `server/.env`（legacy）。同名环境变量
+优先于文件。`.env` 已被 gitignore，不要提交凭据。
 
-EMQX Cloud 等托管 Broker 通常只开放 TLS 端口；Ktor Native 的
-`ktor-network-tls` 不支持裸 TLS socket。服务端改用 MQTT over WebSocket
-Secure（`wss`）：Ktor 的 Curl 引擎自带静态 libcurl + OpenSSL，在
-`linuxArm64`、`linuxX64` 与 `macosArm64` 上都能完成 TLS，不需要外部脚本或
-本地转发进程。
+EMQX Cloud 等托管 Broker 通常只开放 TLS 端口。需要 TLS 时使用 MQTT over
+WebSocket Secure（`wss`），由 paho 的 WebSocket 客户端完成 TLS，不需要外部
+脚本或本地转发进程。
 
 ```bash
-# server/.env（凭据不要提交）
+# go-server/.env（凭据不要提交）
 MQTT_HOST=<broker-host>
 MQTT_PORT=8084
 MQTT_TRANSPORT=websocket
 MQTT_TLS=true
 MQTT_WS_PATH=/mqtt
+TURSO_DATABASE_URL=libsql://<db>-<org>.turso.io
+TURSO_AUTH_TOKEN=<token>
 ```
 
 EMQX 的 WSS 监听器默认使用 8084 端口和 `/mqtt` 路径。`MQTT_TLS=true`
@@ -173,21 +176,16 @@ EMQX 的 WSS 监听器默认使用 8084 端口和 `/mqtt` 路径。`MQTT_TLS=tru
 
 #### 构建服务端镜像（Debian）
 
-`server/Dockerfile` 使用多阶段构建：构建阶段在 glibc 的 JDK 17 镜像里运行
-Gradle 与 Kotlin/Native，运行阶段基于 `debian:bookworm-slim`。Kotlin/Native
-的 Linux 产物链接 glibc，必须有真正的 glibc 运行时；Alpine 的 musl 需要
-`gcompat` 兼容层，实测会在运行一段时间后静默停摆（协程调度器丢失唤醒，
-进程仍在但不处理请求、也不打日志），因此不要改回 Alpine。
+`go-server/Dockerfile` 使用多阶段构建：构建阶段为 `golang:1.26-bookworm`，
+运行阶段基于 `debian:bookworm-slim`。GORM 的 sqlite dialector 导入
+`mattn/go-sqlite3`，所以构建需要 CGO；生产数据库访问仍走纯 Go 的 Turso
+驱动。
 
 ```bash
-export GITHUB_ACTOR=<github-user>        # GitHub Packages 用户名
-export GITHUB_TOKEN=<token-with-read:packages>
-
 # 多架构镜像（linux/amd64 + linux/arm64）。多架构结果必须推送到 registry。
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --secret id=github_actor,env=GITHUB_ACTOR \
-  --secret id=github_token,env=GITHUB_TOKEN \
+  -f go-server/Dockerfile \
   -t <registry>/esp32-control-server:latest \
   --push .
 
@@ -195,8 +193,7 @@ docker buildx build \
 # amd64 主机把 linux/arm64 换成 linux/amd64。
 docker buildx build \
   --platform linux/arm64 \
-  --secret id=github_actor,env=GITHUB_ACTOR \
-  --secret id=github_token,env=GITHUB_TOKEN \
+  -f go-server/Dockerfile \
   -t esp32-control-server:local \
   --load .
 
@@ -204,18 +201,14 @@ docker run --rm --name esp32-server \
   --network mock_default \
   -p 8080:8080 \
   -e MQTT_HOST=emqx -e MQTT_PORT=1883 \
-  -v esp32-data:/data \
+  -e TURSO_DATABASE_URL='libsql://<db>-<org>.turso.io' \
+  -e TURSO_AUTH_TOKEN='<token>' \
   esp32-control-server:local
 ```
 
-- `docker buildx build --platform ...` 会为每个平台注入 `TARGETOS/TARGETARCH`，
-  Dockerfile 将它们映射到 `linkReleaseExecutableLinuxX64`（linux/amd64）和
-  `linkReleaseExecutableLinuxArm64`（linux/arm64），最终合并为多架构 manifest。
-- 构建阶段固定在 `linux/amd64`：Kotlin/Native 只支持 Linux x86_64 作为编译
-  宿主，但可以从该宿主交叉编译出 linux/amd64 与 linux/arm64 两个产物。在
-  Apple Silicon / arm64 主机上，这一步通过 QEMU 模拟 amd64，会比较慢；多架构
-  构建建议放在 amd64 CI 或远程 builder 上。Gradle 与 Kotlin/Native 缓存使用
-  `sharing=locked` 的 cache mount，多平台并行构建时不会互相竞争。
+- `docker buildx build --platform ...` 构建 `linux/amd64` 与 `linux/arm64`
+  两个平台，最终合并为多架构 manifest。CGO 代码无法简单交叉编译，arm64
+  阶段在 buildx/QEMU 下原生编译；多架构构建建议放在 amd64 CI 或远程 builder。
 - 多架构 manifest 需要 `--push`；`--load` 只支持单一平台。若默认 builder
   使用 docker driver 且未启用 containerd image store，先创建容器 builder：
 
@@ -224,27 +217,26 @@ docker run --rm --name esp32-server \
   docker buildx inspect --bootstrap
   ```
 
-- 构建需要网络：Gradle 依赖和 Kotlin/Native 工具链在首次构建时下载。
-- 容器以 UID 10001 的非 root 用户运行，数据库默认在 `/data`。使用 bind
-  mount 时先确保目录对该 UID 可写；命名卷无需额外处理。
-- MQTT 凭据通过环境变量传入，或用 `CONFIG_FILE` 指向挂载的配置文件；
-  不要把 `.env` 打进镜像。
+- 构建需要网络：Go 模块在首次构建时下载。
+- 数据库在 Turso Cloud，容器不需要挂载卷。容器以 UID 10001 的非 root 用户
+  运行，工作目录 `/app` 只读即可。
+- MQTT 与 Turso 凭据通过环境变量传入，或用 `CONFIG_FILE` 指向挂载的配置
+  文件；不要把 `.env` 打进镜像。
 
 #### 在 GitHub Actions 中发布
 
-`.github/workflows/server-image.yml` 在 push 到 `main`、推送 `v*` 标签或手动
-触发时，用同一份 Dockerfile 构建 `linux/amd64` + `linux/arm64` 镜像并推送到
+`.github/workflows/go-server-image.yml` 在 `go-server/**` 变更、手动触发时，
+用同一份 Dockerfile 构建 `linux/amd64` + `linux/arm64` 镜像并推送到
 GitHub Container Registry：
 
 ```
-ghcr.io/ktkongtong/esp-ev1527-server:latest
-ghcr.io/ktkongtong/esp-ev1527-server:sha-<commit>
+ghcr.io/ktkongtong/esp-ev1527-server:go-server
+ghcr.io/ktkongtong/esp-ev1527-server:go-server-<version>
 ```
 
-PR 只构建、不推送。`main` 推送产生 `main`、`sha-*` 与 `latest`；`v1.2.3` 标签
-额外产生 `1.2.3` 与 `1.2`。工作流用仓库 Secret `GH_TOKEN`（classic PAT，
-`read:packages`）读取 GitHub Packages 中的 `ktor-mqtt`，需要在
-Settings → Secrets and variables → Actions 中手动添加。
+PR 只构建、不推送。`go-server-<version>` 与 `/api/v1/health` 的 `version`
+一致。工作流使用内置 `GITHUB_TOKEN` 登录 GHCR，不需要额外的 GitHub Packages
+凭据。
 
 ### 3. 启动 Web 端
 
@@ -291,11 +283,19 @@ Web 需在同一台机器，或自行调整
 
 ```bash
 ./scripts/build-all.sh
+# 服务端二进制：go-server/build/esp32-control-server
 ```
 
+运行已构建镜像时仍需传入 Turso 数据库与 MQTT 配置：
+
 ```bash
-MQTT_HOST=emqx MQTT_NETWORK=mock_default ./scripts/run-server-docker.sh
-# 数据库保存在 .data/
+docker run --rm --name esp32-server \
+  --network mock_default \
+  -p 8080:8080 \
+  -e MQTT_HOST=emqx -e MQTT_PORT=1883 \
+  -e TURSO_DATABASE_URL='libsql://<db>-<org>.turso.io' \
+  -e TURSO_AUTH_TOKEN='<token>' \
+  esp32-control-server:local
 ```
 
 ## 学习新设备
@@ -387,16 +387,18 @@ v1.2.0 不提供事件流。客户端按场景轮询快照：学习 1s、设备�
 | `MQTT_PORT` | `1883` | Broker 端口 |
 | `MQTT_USERNAME` | 空 | MQTT 用户名 |
 | `MQTT_PASSWORD` | 空 | MQTT 密码 |
-| `MQTT_CLIENT_ID` | `esp32-control-server-<random>` | 服务端 MQTT ClientID |
+| `MQTT_CLIENT_ID` | `esp32-control-server_<random>` | 服务端 MQTT ClientID |
 | `MQTT_TOPIC_PREFIX` | `home/OpenMQTTGateway` | 命令、LWT、版本、抓码的公共前缀 |
 | `GATEWAY_CLIENT_ID` | `OpenMQTTGateway_ESP32_315M` | UI/诊断展示用网关 ClientID |
-| `DATABASE_PATH` | `esp32-control.db` | SQLite 文件路径；相对路径基于进程工作目录 |
+| `TURSO_DATABASE_URL` | 必需 | Turso Cloud 数据库 URL，例如 `libsql://<db>-<org>.turso.io` |
+| `DATABASE_URL` | 空 | `TURSO_DATABASE_URL` 的别名；两者都设置时以前者为准 |
+| `TURSO_AUTH_TOKEN` | 空 | Turso Cloud token；本地 sqld 可留空 |
 | `LOG_LEVEL` | `debug` | 日志级别：`debug` / `info` / `warn` / `error`；`debug` 打印每条 MQTT 报文与 HTTP 请求 |
-| `CONFIG_FILE` | 空 | 额外的 `KEY=VALUE` 配置文件路径；未设置时尝试 `.env`、`server/.env` |
+| `CONFIG_FILE` | 空 | 额外的 `KEY=VALUE` 配置文件路径；未设置时尝试 `.env`、`go-server/.env`、`server/.env`（legacy） |
 
-设备、命令、幂等 key 与 tombstone 持久化在 SQLite（Room3）。网关在线状态
-和学习会话是运行时状态：网关状态由 retained LWT 恢复，学习会话在重启后
-丢失；命令发布后即终态，重启不会重发。生产部署仍需增加认证、多网关隔离
+设备、命令、幂等 key 与 tombstone 持久化在 Turso Cloud（GORM）。网关在线
+状态和学习会话是运行时状态：网关状态由 retained LWT 恢复，学习会话在重启
+后丢失；命令发布后即终态，重启不会重发。生产部署仍需增加认证、多网关隔离
 与备份策略。
 
 ## mock 控制接口
@@ -437,7 +439,28 @@ RX 注入只有 `POST /mock/press-button`。CLI 仅保留 `kill`、`boot`、
 5. **产物体积**：Web 产物约 19 MB（Wasm + Skiko + 字体），首次加载较慢。
    生产部署应启用 gzip/brotli 与长期缓存，字体可做子集化。
 
-## 已验证内容（2026-11-03，v1.2.0 迁移）
+## 已验证内容（2026-11-07，Go + Turso 迁移）
+
+本次迁移后实际执行：
+
+- `gofmt -w *.go`、`go vet ./...`、`CGO_ENABLED=1 go test ./...`：
+  `go-server` 65 个测试通过（`:memory:`，不访问 Turso）。
+- 本地 sqld（`http://127.0.0.1:18080`）联调：GORM `AutoMigrate` 成功，
+  `GET /api/v1/health` 返回 `status=ok`，`GET /api/v1/devices` 返回空列表；
+  `TURSO_AUTH_TOKEN` 在日志中显示为 `***`。
+- `./gradlew :contract:testAndroidHostTest :shared:compileKotlinWasmJs
+  :androidApp:assembleDebug :webApp:wasmJsBrowserDistribution` 构建成功。
+- `go-server/Dockerfile` 本地构建成功；容器以非 root 用户运行，
+  连接本地 sqld 后健康检查与设备列表正常。
+- `mock/` 的 `go test ./...` 通过（21 个测试）。
+
+未覆盖：真实 Turso Cloud 账号/网络、真实网关端到端、Android/Web UI 与
+Go 服务端的联调。复用审计与库取舍见
+[`docs/reuse-audit.md`](docs/reuse-audit.md)。
+
+## 历史验证（2026-11-03，Ktor 服务端，已移除）
+
+> 以下记录仅适用于已删除的 Ktor/Kotlin Native 服务端，保留用于追溯。
 
 本次迁移后实际执行：
 
@@ -474,8 +497,7 @@ RX 注入只有 `POST /mock/press-button`。CLI 仅保留 `kill`、`boot`、
 - Broker 停止时服务端进程存活并报告 `gateway.state=offline`；
   Broker 恢复后自动重连，网关回到 `online`。
 
-未覆盖：EMQX 特定行为、多网关隔离、新服务端与 Android/Web UI 的联调
-（客户端仅完成编译与契约测试）。复用审计与库取舍见
+以上为该历史实现的未覆盖项。当前实现的复用审计与库取舍见
 [`docs/reuse-audit.md`](docs/reuse-audit.md)。
 
 ## 常见问题
@@ -493,18 +515,21 @@ AGP 9 起不能再把 `com.android.application` / `com.android.library` 与
 AGP 9.4 强制要求 Build Tools 36.0.0（即使 compileSdk 仍是 35）。
 通过 SDK Manager 安装 `build-tools;36.0.0`。
 
-**Kotlin/Native macOS 目标构建失败**
-本机只有 Command Line Tools 时无法链接 Apple 目标，请安装完整 Xcode，
-或改用 linuxArm64 + Docker 流程。非 macOS 主机会自动禁用 Apple 目标。
-
 **Gradle 报 `minCompileSdk 37`**
 Compose Multiplatform 被升级到了 1.12.x。保持 1.10.0，或同步升级
 compileSdk 37 与 AGP 9.1+。
 
-**服务端启动即退出，提示 `MQTT_HOST is required`**
-服务端没有无 MQTT 的降级模式。设置 `MQTT_HOST`，并确保容器能解析 Broker
-主机名；使用本仓库 compose 栈时加入 `--network mock_default` 并设
-`MQTT_HOST=emqx`。
+**服务端启动即退出，提示 `MQTT_HOST is required` 或
+`TURSO_DATABASE_URL is required`**
+服务端没有无 MQTT 或无数据库的降级模式。设置 `MQTT_HOST`，并确保容器能
+解析 Broker 主机名；使用本仓库 compose 栈时加入 `--network mock_default`
+并设 `MQTT_HOST=emqx`。数据库必须设置 `TURSO_DATABASE_URL`（`DATABASE_URL`
+是别名）；Turso Cloud 还需要 `TURSO_AUTH_TOKEN`。
+
+**`go build` 报 `cgo: C compiler not found`**
+GORM 的 `gorm.io/driver/sqlite` 导入 `mattn/go-sqlite3`，构建需要 CGO 与
+C 工具链。本机安装 Xcode Command Line Tools 或 `build-essential`；构建时
+设置 `CGO_ENABLED=1`。服务端镜像的 Dockerfile 已包含该配置。
 
 **网关显示 offline**
 检查 mock 容器日志与 EMQX 连接；mock 使用固定 ClientID

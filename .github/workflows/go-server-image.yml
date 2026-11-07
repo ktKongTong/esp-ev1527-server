@@ -31,8 +31,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # GHCR requires a lowercase repository path. The image shares the
-      # package with the Kotlin server but uses the go-server tags.
+      # GHCR requires a lowercase repository path. The image uses the
+      # go-server tags.
       - name: Set image name
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
@@ -47,8 +47,8 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
 
-      # The SQLite driver needs CGO, so the arm64 stage runs natively under
-      # emulation instead of cross-compiling.
+      # The GORM sqlite dialector needs CGO, so the arm64 stage runs natively
+      # under emulation instead of cross-compiling.
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 

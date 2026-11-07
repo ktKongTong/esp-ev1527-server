@@ -7,6 +7,7 @@ require (
 	github.com/labstack/echo/v4 v4.16.3
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.2
+	turso.tech/database/tursogo-serverless v0.0.0-20261107095519-8e7eac038f1f
 )
 
 require (

@@ -8,12 +8,13 @@ cd "$(dirname "$0")/.."
 export JAVA_HOME
 
 ./gradlew \
-    :server:linkDebugExecutableLinuxArm64 \
     :androidApp:assembleDebug \
     :webApp:wasmJsBrowserDistribution \
     --console=plain
 
+(cd go-server && CGO_ENABLED=1 go build -o build/esp32-control-server .)
+
 echo
-echo "Server: server/build/bin/linuxArm64/debugExecutable/esp32-control-server.kexe"
+echo "Server: go-server/build/esp32-control-server"
 echo "APK:    androidApp/build/outputs/apk/debug/androidApp-debug.apk"
 echo "Web:    webApp/build/dist/wasmJs/productionExecutable/index.html"
