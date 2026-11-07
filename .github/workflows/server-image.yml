@@ -36,12 +36,12 @@ jobs:
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
       # The versioned tag mirrors the version reported by GET /api/v1/health.
-      # Read it from the single source in contract.go so the tag cannot drift.
+      # Read it from the single source in the contract package so the tag cannot drift.
       - name: Read server version
         run: |
-          VERSION=$(sed -n 's/^[[:space:]]*serverVersion[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' go-server/contract.go)
+          VERSION=$(sed -n 's/^[[:space:]]*ServerVersion[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' go-server/internal/contract/contract.go)
           if [ -z "$VERSION" ]; then
-            echo "serverVersion not found in go-server/contract.go" >&2
+            echo "ServerVersion not found in go-server/internal/contract/contract.go" >&2
             exit 1
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
