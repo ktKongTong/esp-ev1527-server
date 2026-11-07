@@ -2,7 +2,7 @@
 
 > 历史说明（2026-11-07）：本审计记录的是已移除的 Ktor/Kotlin Native 服务端。
 > 该服务端已于 2026-11-07 删除；当前服务端为 `go-server`（Go + Echo + GORM +
-> Turso Cloud）。下文所有 `server/...` 行仅作历史保留，新的迁移选型见第 7 节。
+> Turso Cloud）。下文所有 `server/...` 行仅作历史保留，新的迁移选型见第 7、9 节。
 
 审计日期：2026-11-03。范围：仓库内所有运行时实现与依赖。
 本地文件：`docs/reuse-audit.md`；本记录涵盖 contract v1.2.0 迁移与
@@ -185,7 +185,7 @@ HTTP 契约、MQTT 协议、状态机与表结构不变。
 | 能力 | 复用 | 说明 |
 | --- | --- | --- |
 | HTTP | `github.com/labstack/echo/v4` v4.16.3 | 已在 `go-server` 中使用，不新增路由框架 |
-| ORM / 迁移 | `gorm.io/gorm` v1.31.2 + `gorm.io/driver/sqlite` v1.6.0 | 通过 `Config{Conn}` 复用 SQLite 方言与 `AutoMigrate` |
+| ORM / 迁移 | `gorm.io/gorm` v1.31.2 + `gorm.io/driver/sqlite` v1.6.0 | 通过 `Config{Conn}` 复用 SQLite 方言与 `AutoMigrate`（迁移部分见第 9 节） |
 | MQTT | `github.com/eclipse/paho.mqtt.golang` v1.5.1 | 已在 `go-server` 中使用 |
 | JSON / 时间 / ID | Go 标准库 + 现有 `contract.go` | 不新增协议层或 DTO 生成器 |
 | 测试数据库 | mattn `:memory:` | 与生产共用同一 GORM dialector |
@@ -289,3 +289,45 @@ HTTP 契约、MQTT 协议、状态机与表结构不变。
   （Kotlin 模块未改动，任务多为 UP-TO-DATE）。
 - `mock/`：21 个测试通过。
 - 未执行：真实 Turso Cloud、真实网关端到端、容器构建复测。
+
+## 9. 2026-11-07 版本化迁移（goose）
+
+`AutoMigrate` 只保证“当前模型能建表”，没有迁移历史，无法表达列改名、数据
+回填等有序变更。本节把 schema 管理改为版本化 SQL 迁移；表结构与仓储行为不变。
+
+### 9.1 复用
+
+| 能力 | 复用 | 说明 |
+| --- | --- | --- |
+| 数据库连接 | `internal/repository/store.go` 的 `*sql.DB` | 迁移直接运行在 Turso / `:memory:` 同一连接上，不新建第二套连接 |
+| SQLite 方言 | `gorm.io/driver/sqlite` v1.6.0 | 迁移 SQL 与 GORM 使用同一方言与测试数据库 |
+| GORM row 模型 | `deviceRow`、`deviceTombstoneRow`、`idempotencyRow` | 模型只服务查询与写入，不再承担建表 |
+| 日志 | `internal/logging` | 启动时输出已应用的迁移版本 |
+
+### 9.2 新增依赖
+
+`github.com/pressly/goose/v3` v3.29.0。
+
+- 维护活跃，支持 SQLite 与 `database/sql` 连接；本项目只使用 Provider API。
+- 只新增 `mfridman/interpolate`、`sethvargo/go-retry`、`go.uber.org/multierr`
+  三个间接依赖，纯 Go、无 CGO。
+- 版本表为 `goose_db_version`；迁移文件通过 `embed.FS` 编入二进制。
+
+### 9.3 未采用
+
+| 方案 | 原因 |
+| --- | --- |
+| 保留 `AutoMigrate` | 无版本历史，无法审查或回放 schema 变更 |
+| `go-gormigrate/gormigrate` | 迁移内容是 Go 代码，schema 变更不可直接用 SQL 审阅；与现有 SQL 方言复用点重复 |
+| `golang-migrate/migrate` | 需要额外的 source/driver 装配，依赖与配置面更大；本项目只需要“嵌入式 SQL + 现有连接” |
+| 自研迁移执行器 | 版本表、事务、文件排序与校验属于成熟工具的职责，自研收益低 |
+| 独立迁移 CLI / Job | 当前为单实例容器部署；保持启动时迁移，避免新增部署步骤。多副本滚动前应先启动一个实例完成升级 |
+
+### 9.4 兼容与验证
+
+- 既有数据库由 `AutoMigrate` 创建，没有版本表。`00001_baseline.sql` 使用
+  `CREATE TABLE IF NOT EXISTS`：升级时补建缺失表并把版本记为 1，不修改已有行。
+- 测试覆盖：全新库建表、重复迁移幂等、旧 `AutoMigrate` schema 升级后数据保留。
+- `gofmt -l .` 无输出，`go vet ./...` 通过，`CGO_ENABLED=1 go test ./...`：
+  84 个测试通过（`:memory:`，不访问 Turso）。
+- 未执行：真实 Turso Cloud 上的迁移、并发多实例启动。

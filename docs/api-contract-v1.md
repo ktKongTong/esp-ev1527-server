@@ -299,7 +299,8 @@ CommandService ────────► mqtt.Transmitter ──► MQTT
 | HTTP | `go-server/internal/server/http.go` | 参数/请求体解析、状态码映射；不含状态机 |
 | 领域服务 | `go-server/internal/service/` | 设备、命令发布、学习状态机、网关运行时状态 |
 | 数据访问 | `go-server/internal/repository/repositories.go` | 仓储与 row ↔ contract 映射 |
-| 持久化 | `go-server/internal/repository/store.go` | GORM row 模型、Turso 连接、`AutoMigrate` |
+| 持久化 | `go-server/internal/repository/store.go` | GORM row 模型、Turso 连接 |
+| 迁移 | `go-server/internal/repository/migrate.go` + `migrations/` | goose 版本化 SQL，启动时执行 |
 | MQTT | `go-server/internal/mqtt/mqtt.go` | paho 连接、订阅、发布、重连；命令帧适配 |
 | 跨语言 DTO | `go-server/internal/contract/contract.go` | 镜像 `contract` 的 DTO、枚举与版本常量 |
 | 错误 / 日志 / ID | `go-server/internal/apierror/`、`logging/`、`idgen/` | 统一错误信封、slog、ID 生成 |
@@ -319,7 +320,11 @@ CommandService ────────► mqtt.Transmitter ──► MQTT
   `TURSO_DATABASE_URL` 为必填，`TURSO_AUTH_TOKEN` 用于 Turso Cloud；
   `DATABASE_URL` 是 `TURSO_DATABASE_URL` 的别名。不落容器本地磁盘。
 - ORM：GORM（`gorm.io/gorm` + `gorm.io/driver/sqlite`）。dialector 只提供
-  SQLite SQL 与 `AutoMigrate`，连接由 Turso 驱动提供，不打开本地文件。
+  SQLite SQL，连接由 Turso 驱动提供，不打开本地文件。
+- 迁移：`github.com/pressly/goose/v3` 执行
+  `go-server/internal/repository/migrations/` 下的版本化 SQL，启动时应用未执行
+  的版本，已应用版本记录在 `goose_db_version`。不使用 `AutoMigrate`；新增
+  schema 变更只追加新编号迁移。
 - 表：
   - `devices`：遥控器名称、位置、开/关码与 RF 参数。没有状态列。
   - `device_tombstones`：移除时间，保留 24h。
@@ -1852,7 +1857,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
    镜像同一协议。
 2. 领域拆分：`deviceService`、`commandService`、`learningService`、
    `gatewayIngest`、`gatewayStatusStore`。
-3. 持久化：GORM row 模型、仓储、Turso Cloud 连接与 `AutoMigrate`。
+3. 持久化：GORM row 模型、仓储、Turso Cloud 连接与 goose 版本化迁移。
 4. MQTT：paho 传输、LWT/version/捕获摄入、命令单向下发。
 5. 服务端 v1 路由：健康、设备（含编辑）、命令、学习、删除；无 SSE。
 6. 客户端轮询；控制/学习/移除交互保持 v1 语义。

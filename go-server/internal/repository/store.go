@@ -47,9 +47,10 @@ type idempotencyRow struct {
 
 func (idempotencyRow) TableName() string { return "idempotency" }
 
-// Open connects GORM to Turso. The GORM sqlite dialector supplies the SQLite
-// SQL and migration behavior; it runs on the connection provided by the
-// pure-Go Turso serverless driver instead of opening a local database file.
+// Open connects GORM to Turso and applies the versioned migrations. The GORM
+// sqlite dialector supplies the SQLite SQL; it runs on the connection provided
+// by the pure-Go Turso serverless driver instead of opening a local database
+// file.
 //
 // The ":memory:" branch is reserved for tests. It uses mattn/go-sqlite3 through
 // the same dialector, so tests exercise the same SQL dialect as production.
@@ -75,7 +76,7 @@ func Open(databaseURL, authToken string) (*gorm.DB, error) {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("open turso database: %w", err)
 	}
-	if err := db.AutoMigrate(&deviceRow{}, &deviceTombstoneRow{}, &idempotencyRow{}); err != nil {
+	if err := migrate(sqlDB); err != nil {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("migrate turso database: %w", err)
 	}

@@ -20,10 +20,14 @@ server 作为客户端和网关沟通的中间节点，需要完成以下内容�
   Turso serverless 驱动，不打开本地 SQLite 文件。
 - 数据库：`turso.tech/database/tursogo-serverless`，通过
   `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` 连接 Turso Cloud。
-  `DATABASE_URL` 是 `TURSO_DATABASE_URL` 的别名。启动时执行 GORM
-  `AutoMigrate`。
-- 表：`devices`、`device_tombstones`、`idempotency`。列名保持 camelCase，
-  与上一版服务端的表结构兼容。
+  `DATABASE_URL` 是 `TURSO_DATABASE_URL` 的别名。
+- 迁移：`github.com/pressly/goose/v3` 执行
+  `go-server/internal/repository/migrations/` 下的版本化 SQL，启动时自动应用
+  未执行的版本；已应用版本记录在 `goose_db_version` 表。不使用 GORM
+  `AutoMigrate`。`00001_baseline.sql` 用 `CREATE TABLE IF NOT EXISTS` 兼容
+  旧 `AutoMigrate` 创建的数据库，升级时只记录版本，不改动已有数据。
+- 表：`devices`、`device_tombstones`、`idempotency`，以及迁移版本表
+  `goose_db_version`。业务列名保持 camelCase，与上一版服务端的表结构兼容。
 - MQTT：paho 提供 MQTT 3.1.1、QoS 1、keepalive 与自动重连。MQTT 是必需配置：
   未设置 `MQTT_HOST` 时启动失败，没有本地降级模式。
 - 配置只读取工作目录中的 `.env`（存在则加载，缺失则跳过），环境变量优先；
@@ -40,7 +44,7 @@ server 作为客户端和网关沟通的中间节点，需要完成以下内容�
   `MQTT_TLS=true` 不能与 `MQTT_TRANSPORT=tcp` 组合，启动时直接报错。
 - 结构：`main.go` 为组合根；HTTP 在 `http.go`，领域逻辑在 `devices.go` /
   `commands.go` / `learning.go`，持久化在 `repositories.go` + `store.go`，
-  MQTT 在 `mqtt.go` / `gateway.go`。
+  迁移在 `migrate.go` + `migrations/`，MQTT 在 `mqtt.go` / `gateway.go`。
 - 状态同步：v1.2.0 不提供 SSE；客户端轮询快照。
 
 接口、状态机与数据流的完整定义见

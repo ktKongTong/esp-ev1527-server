@@ -10,15 +10,16 @@ HTTP 契约与 MQTT 网关协议。Ktor/Kotlin Native 服务端已移除；本�
 | --- | --- | --- |
 | 语言 | Go 1.26+ | 需要 CGO（GORM sqlite dialector 导入 `mattn/go-sqlite3`） |
 | HTTP | Echo v4.16.3 | 路由、CORS、错误映射 |
-| ORM | GORM v1.31.2 + `gorm.io/driver/sqlite` v1.6.0 | 通过 `Config{Conn}` 复用 SQLite SQL 与迁移能力 |
+| ORM | GORM v1.31.2 + `gorm.io/driver/sqlite` v1.6.0 | 通过 `Config{Conn}` 复用 SQLite SQL |
+| 迁移 | `github.com/pressly/goose/v3` v3.29.0 | 内嵌 SQL 版本化迁移，启动时执行 |
 | 数据库 | Turso Cloud | 纯 Go 驱动 `turso.tech/database/tursogo-serverless`，不落容器磁盘 |
 | MQTT | `eclipse/paho.mqtt.golang` v1.5.1 | MQTT 3.1.1、QoS 1、自动重连 |
 | 配置 | Koanf v2.4.1 | dotenv 文件 + 环境变量分层加载 |
 | 日志 | Go 标准库 `log/slog` | 分级、结构化输出到 stdout |
 
 生产数据库访问使用 Turso serverless 驱动；`gorm.io/driver/sqlite` 只提供
-SQLite 方言与 `AutoMigrate`，不会打开本地文件。测试使用同一 dialector 的
-`:memory:` 分支。
+SQLite 方言，不会打开本地文件。schema 变更由内嵌的 goose SQL 迁移执行，
+不使用 `AutoMigrate`。测试使用同一 dialector 的 `:memory:` 分支。
 
 ## 目录
 
@@ -37,7 +38,9 @@ internal/
   idgen/
     id.go                   请求 / 设备 / 会话 ID 生成
   repository/
-    store.go                GORM row 模型、Turso 连接、AutoMigrate
+    store.go                GORM row 模型、Turso 连接
+    migrate.go              内嵌 goose 迁移执行器
+    migrations/             版本化 SQL 迁移
     repositories.go         device / idempotency / tombstone 仓储
   service/
     devices.go              设备查询与删除（tombstone）
@@ -201,8 +204,14 @@ curl -H "Authorization: Bearer $AUTH_TOKEN" \
   `TURSO_AUTH_TOKEN` 访问 Turso Cloud。`libsql://` 与 `turso://` 由驱动统一为
   HTTPS；本地 sqld 可直接使用 `http://127.0.0.1:8080`。
 - 表：`devices`、`device_tombstones`、`idempotency`，列名保持 camelCase，
-  与上一版服务端的表结构一致。
-- 迁移：启动时执行 GORM `AutoMigrate`。表已存在且列兼容时不会删改数据。
+  与上一版服务端的表结构一致；迁移版本记录在 `goose_db_version`。
+- 迁移：启动时由 goose 按编号执行 `internal/repository/migrations/` 下未应用的
+  版本。`00001_baseline.sql` 使用 `CREATE TABLE IF NOT EXISTS` 兼容旧
+  `AutoMigrate` 创建的数据库，升级时只记录版本，不改动已有数据。
+- 新增 schema 变更：在 `internal/repository/migrations/` 添加下一个编号的
+  `.sql`（例如 `00002_add_devices_state.sql`），包含 `-- +goose Up` 与
+  `-- +goose Down`；不要修改已发布的迁移。迁移在启动时自动执行，因此部署
+  时应先启动一个实例完成升级，再滚动其余实例。
 - 本地旧数据库：本模块不再打开 SQLite 文件。若要保留旧的
   `esp32-control.db` 数据，需要先用 Turso CLI 或 SQL dump 导入 Turso 数据库，
   再切换 `TURSO_DATABASE_URL`；仓库不自动执行该迁移。
@@ -225,7 +234,7 @@ Ktor/Kotlin Native 服务端已于 2026-11-07 移除，以下是仍然适用的�
 
 ```text
 Reused: gorm.io/gorm v1.31.2 + gorm.io/driver/sqlite v1.6.0
-        (existing GORM persistence and migration path)
+        (existing GORM persistence path)
 Reused: github.com/labstack/echo/v4 v4.16.3 (existing HTTP layer),
         including middleware.KeyAuth for bearer-token auth
 Reused: github.com/eclipse/paho.mqtt.golang v1.5.1 (existing MQTT client)
@@ -244,6 +253,13 @@ Not reused because: go-libsql is CGO-based and links a second C SQLite, which
 New implementation scope: connection construction and config fields only;
         table models, repositories, state machines, and HTTP handlers are
         unchanged.
+New dependency: github.com/pressly/goose/v3 v3.29.0
+Not reused because: GORM AutoMigrate keeps no migration history and cannot
+        express ordered, reviewable schema changes. goose adds version
+        tracking and embedded SQL files on the existing *sql.DB connection.
+New implementation scope: migration runner and baseline SQL only; connection
+        wiring, GORM models, repositories, state machines, and HTTP handlers
+        stay unchanged.
 ```
 
 `tursogo-serverless` is the official Turso Cloud serverless driver but has no

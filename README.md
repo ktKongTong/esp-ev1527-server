@@ -86,6 +86,7 @@ esp32/
 | Echo | 4.16.3 | Go 服务端 HTTP 路由、CORS、错误映射 |
 | MQTT | `eclipse/paho.mqtt.golang` 1.5.1 | MQTT 3.1.1 客户端，QoS 1 与自动重连 |
 | 持久化 | GORM 1.31.2 + Turso Cloud | `gorm.io/driver/sqlite` 通过 `Config{Conn}` 跑在纯 Go 的 Turso 驱动上 |
+| 迁移 | goose 3.29.0 | 版本化 SQL 迁移，服务端启动时执行 |
 | Kotlin/Wasm | 2.4.21 | 浏览器端使用 WasmGC |
 | EMQX | 5.8.7 | 仅测试栈使用，可替换为任意 MQTT 3.1.1 Broker |
 
@@ -394,7 +395,8 @@ v1.2.0 不提供事件流。客户端按场景轮询快照：学习 1s、设备�
 | `TURSO_AUTH_TOKEN` | 空 | Turso Cloud token；本地 sqld 可留空 |
 | `LOG_LEVEL` | `debug` | 日志级别：`debug` / `info` / `warn` / `error`；`debug` 打印每条 MQTT 报文与 HTTP 请求 |
 
-设备、命令、幂等 key 与 tombstone 持久化在 Turso Cloud（GORM）。网关在线
+设备、命令、幂等 key 与 tombstone 持久化在 Turso Cloud（GORM）；schema 由
+goose 版本化迁移维护，服务端启动时自动应用未执行的版本。网关在线
 状态和学习会话是运行时状态：网关状态由 retained LWT 恢复，学习会话在重启
 后丢失；命令发布后即终态，重启不会重发。生产部署仍需增加认证、多网关隔离
 与备份策略。

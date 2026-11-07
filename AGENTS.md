@@ -61,9 +61,13 @@ rg -n "require|replace" go-server/go.mod mock/go.mod
   `.env`，环境变量覆盖文件值。
 - **持久化**：Turso Cloud + GORM。`turso.tech/database/tursogo-serverless`
   提供纯 Go 远程连接，`gorm.io/driver/sqlite` 通过 `Config{Conn}` 复用
-  SQLite 方言与 `AutoMigrate`；不打开本地数据库文件，不使用第二套 ORM。
+  SQLite 方言；不打开本地数据库文件，不使用第二套 ORM。
   `TURSO_DATABASE_URL` 必填，`DATABASE_URL` 是别名，`TURSO_AUTH_TOKEN` 用于
   Turso Cloud。GORM sqlite dialector 导入 `mattn/go-sqlite3`，构建需要 CGO。
+- **迁移**：使用 `github.com/pressly/goose/v3` 执行
+  `go-server/internal/repository/migrations/` 下的版本化 SQL，已应用版本记录在
+  `goose_db_version` 表；服务端启动时自动执行，不使用 GORM `AutoMigrate`。
+  新增 schema 变更只能追加新的编号迁移，不修改已发布的迁移。
 - **状态同步**：v1.2.0 不提供 SSE；客户端按契约周期轮询快照。
 - **时间**：Go 使用标准库 `time.Now().UnixMilli()`；测试通过
   `service.WithNow` 注入固定时钟（`go-server/internal/service/options.go`）。
