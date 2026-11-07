@@ -1,16 +1,21 @@
-package main
+package service
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
 	"gorm.io/gorm"
+
+	"esp32controlserver/internal/apierror"
+	"esp32controlserver/internal/contract"
+	"esp32controlserver/internal/repository"
 )
 
 func newTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	db, err := openDatabase(":memory:", "")
+	db, err := repository.Open(":memory:", "")
 	if err != nil {
 		t.Fatalf("open test database: %v", err)
 	}
@@ -22,19 +27,19 @@ func newTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
-func newOnlineGateway() *gatewayStatusStore {
-	gateway := newGatewayStatusStore("test-gateway")
-	gateway.setGateway(gatewayOnline, nil)
+func newOnlineGateway() *GatewayStatusStore {
+	gateway := NewGatewayStatusStore("test-gateway")
+	gateway.SetGateway(contract.GatewayOnline, nil)
 	return gateway
 }
 
 type fakeTransmitter struct {
 	mu       sync.Mutex
-	payloads []rfPayload
+	payloads []contract.RFPayload
 	err      error
 }
 
-func (f *fakeTransmitter) Send(_ context.Context, payload rfPayload) error {
+func (f *fakeTransmitter) Send(_ context.Context, payload contract.RFPayload) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
@@ -44,16 +49,16 @@ func (f *fakeTransmitter) Send(_ context.Context, payload rfPayload) error {
 	return nil
 }
 
-func (f *fakeTransmitter) calls() []rfPayload {
+func (f *fakeTransmitter) calls() []contract.RFPayload {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]rfPayload(nil), f.payloads...)
+	return append([]contract.RFPayload(nil), f.payloads...)
 }
 
-func requireAPIError(t *testing.T, err error, status int, code string) *apiError {
+func requireAPIError(t *testing.T, err error, status int, code string) *apierror.Error {
 	t.Helper()
-	apiErr, ok := err.(*apiError)
-	if !ok {
+	var apiErr *apierror.Error
+	if !errors.As(err, &apiErr) {
 		t.Fatalf("error = %v, want apiError %s", err, code)
 	}
 	if apiErr.Status != status || apiErr.Code != code {
@@ -62,16 +67,16 @@ func requireAPIError(t *testing.T, err error, status int, code string) *apiError
 	return apiErr
 }
 
-func sampleDevice() device {
+func sampleDevice() contract.Device {
 	const codeOn int64 = 1714739
 	codeOff := (codeOn &^ 0xF) | ((codeOn & 0xF) ^ 1)
-	return device{
+	return contract.Device{
 		ID:               "dev_test",
 		Name:             "pump",
 		Location:         "pond",
 		CodeOn:           codeOn,
 		CodeOff:          codeOff,
-		RF:               rfParameters{Protocol: 1, Length: 24, Repeat: 5},
+		RF:               contract.RFParameters{Protocol: 1, Length: 24, Repeat: 5},
 		CreatedAtEpochMs: 1000,
 	}
 }

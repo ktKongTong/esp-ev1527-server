@@ -1,4 +1,4 @@
-package main
+package logging
 
 import (
 	"context"
@@ -15,22 +15,22 @@ func TestParseLogLevel(t *testing.T) {
 		"error":   slog.LevelError,
 	}
 	for raw, want := range cases {
-		got, err := parseLogLevel(raw)
+		got, err := ParseLevel(raw)
 		if err != nil {
-			t.Fatalf("parseLogLevel(%q): %v", raw, err)
+			t.Fatalf("ParseLevel(%q): %v", raw, err)
 		}
 		if got != want {
-			t.Fatalf("parseLogLevel(%q) = %s, want %s", raw, got, want)
+			t.Fatalf("ParseLevel(%q) = %s, want %s", raw, got, want)
 		}
 	}
-	if _, err := parseLogLevel("trace"); err == nil {
+	if _, err := ParseLevel("trace"); err == nil {
 		t.Fatal("expected an error for an unsupported level")
 	}
 }
 
 func TestLogLevelFiltering(t *testing.T) {
-	t.Cleanup(func() { setLogLevel(levelDebug) })
-	setLogLevel(levelInfo)
+	t.Cleanup(func() { SetLevel(slog.LevelDebug) })
+	SetLevel(slog.LevelInfo)
 
 	ctx := context.Background()
 	if appLog.Enabled(ctx, slog.LevelDebug) {
@@ -41,11 +41,11 @@ func TestLogLevelFiltering(t *testing.T) {
 	}
 }
 
-func TestLogPreview(t *testing.T) {
-	if got := logPreview([]byte("  abc  "), 10); got != "abc" {
+func TestPreview(t *testing.T) {
+	if got := Preview([]byte("  abc  "), 10); got != "abc" {
 		t.Fatalf("short preview = %q", got)
 	}
-	if got := logPreview([]byte("abcdefghij"), 4); got != "abcd... (10B)" {
+	if got := Preview([]byte("abcdefghij"), 4); got != "abcd... (10B)" {
 		t.Fatalf("truncated preview = %q", got)
 	}
 }

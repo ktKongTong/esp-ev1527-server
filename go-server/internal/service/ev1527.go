@@ -1,4 +1,4 @@
-package main
+package service
 
 // EV1527 frames are fixed at 24 bits: a 20-bit address plus a 4-bit key.
 // The gateway reports a protocol number from whichever decoder template

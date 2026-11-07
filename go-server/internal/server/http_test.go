@@ -1,47 +1,101 @@
-package main
+package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/labstack/echo/v4"
+
+	"esp32controlserver/internal/config"
+	"esp32controlserver/internal/contract"
+	"esp32controlserver/internal/repository"
+	"esp32controlserver/internal/service"
 )
 
-const testAuthToken = "test-auth-token"
+const testAuthToken = "file-auth-token"
 
-func newTestAPI(t *testing.T) (*echo.Echo, *deviceRepository, *fakeTransmitter, *int64) {
+type fakeTransmitter struct {
+	mu       sync.Mutex
+	payloads []contract.RFPayload
+	err      error
+}
+
+func (f *fakeTransmitter) Send(_ context.Context, payload contract.RFPayload) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	f.payloads = append(f.payloads, payload)
+	return nil
+}
+
+func (f *fakeTransmitter) calls() []contract.RFPayload {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]contract.RFPayload(nil), f.payloads...)
+}
+
+func sampleDevice() contract.Device {
+	const codeOn int64 = 1714739
+	codeOff := (codeOn &^ 0xF) | ((codeOn & 0xF) ^ 1)
+	return contract.Device{
+		ID:               "dev_test",
+		Name:             "pump",
+		Location:         "pond",
+		CodeOn:           codeOn,
+		CodeOff:          codeOff,
+		RF:               contract.RFParameters{Protocol: 1, Length: 24, Repeat: 5},
+		CreatedAtEpochMs: 1000,
+	}
+}
+
+func newTestAPI(
+	t *testing.T,
+) (*echo.Echo, *repository.DeviceRepository, *fakeTransmitter, *int64) {
 	t.Helper()
-	db := newTestDB(t)
-	devices := &deviceRepository{db: db}
-	idempotency := &idempotencyRepository{db: db}
-	gateway := newOnlineGateway()
-	transmitter := &fakeTransmitter{}
+	db, err := repository.Open(":memory:", "")
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+
+	devices := repository.NewDeviceRepository(db)
+	idempotency := repository.NewIdempotencyRepository(db)
 	now := int64(1_000_000)
+	clock := service.WithNow(func() int64 { return now })
 
-	deviceService := newDeviceService(db, devices)
-	deviceService.now = func() int64 { return now }
-	commandService := newCommandService(db, devices, idempotency, gateway, transmitter)
-	commandService.now = func() int64 { return now }
-	learning := newLearningService(db, devices, gateway, transmitter)
-	learning.now = func() int64 { return now }
+	gateway := service.NewGatewayStatusStore("test-gateway", clock)
+	gateway.SetGateway(contract.GatewayOnline, nil)
+	transmitter := &fakeTransmitter{}
+
+	deviceService := service.NewDeviceService(db, devices, clock)
+	commandService := service.NewCommandService(
+		db, devices, idempotency, gateway, transmitter, clock,
+	)
 	counter := 0
-	learning.newID = func(prefix string) string {
-		counter++
-		return prefix + "_http_test_" + strconv.Itoa(counter)
-	}
+	learning := service.NewLearningService(
+		db, devices, gateway, transmitter, clock,
+		service.WithIDGenerator(func(prefix string) string {
+			counter++
+			return prefix + "_http_test_" + strconv.Itoa(counter)
+		}),
+	)
 
-	api := &apiServer{
-		devices:          deviceService,
-		commands:         commandService,
-		learning:         learning,
-		gateway:          gateway,
-		startedAtEpochMs: nowEpochMs() - 65_000,
-	}
-	return newEchoServer(api, authConfig{Token: testAuthToken}), devices, transmitter, &now
+	api := NewAPI(deviceService, commandService, learning, gateway)
+	api.now = func() int64 { return now }
+	api.startedAtEpochMs = now - 65_000
+	return NewEcho(api, config.AuthConfig{Token: testAuthToken}), devices, transmitter, &now
 }
 
 // doRequest sends an authenticated request. Tests that exercise the auth
@@ -82,9 +136,12 @@ func doRequestWithAuth(
 	return recorder
 }
 
-func decodeErrorEnvelope(t *testing.T, recorder *httptest.ResponseRecorder) apiErrorEnvelope {
+func decodeErrorEnvelope(
+	t *testing.T,
+	recorder *httptest.ResponseRecorder,
+) contract.APIErrorEnvelope {
 	t.Helper()
-	var envelope apiErrorEnvelope
+	var envelope contract.APIErrorEnvelope
 	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("decode error envelope %q: %v", recorder.Body.String(), err)
 	}
@@ -106,20 +163,22 @@ func TestHTTPHealth(t *testing.T) {
 		t.Fatalf("Cache-Control = %q", got)
 	}
 
-	var health healthResponse
+	var health contract.HealthResponse
 	if err := json.Unmarshal(recorder.Body.Bytes(), &health); err != nil {
 		t.Fatalf("decode health: %v", err)
 	}
-	if health.Status != "ok" || health.Service != serviceName || health.APIVersion != apiVersion {
+	if health.Status != "ok" || health.Service != contract.ServiceName ||
+		health.APIVersion != contract.APIVersion {
 		t.Fatalf("unexpected health: %+v", health)
 	}
-	if health.Runtime != "Go" || health.Version != serverVersion {
+	if health.Runtime != "Go" || health.Version != contract.ServerVersion {
 		t.Fatalf("unexpected runtime/version: %+v", health)
 	}
 	if health.UptimeSeconds < 64 || health.UptimeSeconds > 66 {
 		t.Fatalf("uptimeSeconds = %d, want about 65", health.UptimeSeconds)
 	}
-	if health.Gateway.State != gatewayOnline || health.Gateway.Receiver.State != receiverUnknown {
+	if health.Gateway.State != contract.GatewayOnline ||
+		health.Gateway.Receiver.State != contract.ReceiverUnknown {
 		t.Fatalf("unexpected gateway: %+v", health.Gateway)
 	}
 }
@@ -262,11 +321,11 @@ func TestHTTPLearningLifecycle(t *testing.T) {
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	var session learningSession
+	var session contract.LearningSession
 	if err := json.Unmarshal(recorder.Body.Bytes(), &session); err != nil {
 		t.Fatalf("decode session: %v", err)
 	}
-	if session.State != learningCollectingOn || session.ID == "" {
+	if session.State != contract.LearningCollectingOn || session.ID == "" {
 		t.Fatalf("unexpected session: %+v", session)
 	}
 	if !strings.Contains(recorder.Body.String(), `"candidates":[]`) {
@@ -299,18 +358,18 @@ func TestHTTPLearningLifecycle(t *testing.T) {
 	recorder = doRequest(
 		t, e, http.MethodGet, "/api/v1/learning/sessions/"+session.ID, "", "", nil,
 	)
-	var cancelled learningSession
+	var cancelled contract.LearningSession
 	if err := json.Unmarshal(recorder.Body.Bytes(), &cancelled); err != nil {
 		t.Fatalf("decode cancelled session: %v", err)
 	}
-	if cancelled.State != learningCancelled {
+	if cancelled.State != contract.LearningCancelled {
 		t.Fatalf("state = %s, want cancelled", cancelled.State)
 	}
 }
 
 func TestHTTPCommandIdempotency(t *testing.T) {
 	e, devices, transmitter, _ := newTestAPI(t)
-	if err := devices.insert(t.Context(), sampleDevice()); err != nil {
+	if err := devices.Insert(t.Context(), sampleDevice()); err != nil {
 		t.Fatalf("insert device: %v", err)
 	}
 	headers := map[string]string{"Idempotency-Key": "http-key-1"}
@@ -326,11 +385,11 @@ func TestHTTPCommandIdempotency(t *testing.T) {
 	if got := recorder.Header().Get("Idempotent-Replayed"); got != "" {
 		t.Fatalf("first dispatch replayed = %q", got)
 	}
-	var first commandDispatched
+	var first contract.CommandDispatched
 	if err := json.Unmarshal(recorder.Body.Bytes(), &first); err != nil {
 		t.Fatalf("decode dispatch: %v", err)
 	}
-	if first.DeviceID != "dev_test" || first.Action != actionTurnOn {
+	if first.DeviceID != "dev_test" || first.Action != contract.ActionTurnOn {
 		t.Fatalf("unexpected dispatch: %+v", first)
 	}
 
@@ -362,7 +421,7 @@ func TestHTTPCommandIdempotency(t *testing.T) {
 
 func TestHTTPDeleteDeviceLeavesTombstone(t *testing.T) {
 	e, devices, _, _ := newTestAPI(t)
-	if err := devices.insert(t.Context(), sampleDevice()); err != nil {
+	if err := devices.Insert(t.Context(), sampleDevice()); err != nil {
 		t.Fatalf("insert device: %v", err)
 	}
 	recorder := doRequest(t, e, http.MethodDelete, "/api/v1/devices/dev_test", "", "", nil)
@@ -382,7 +441,7 @@ func TestHTTPDeleteDeviceLeavesTombstone(t *testing.T) {
 func TestHTTPUpdateDeviceLabels(t *testing.T) {
 	e, devices, _, _ := newTestAPI(t)
 	original := sampleDevice()
-	if err := devices.insert(t.Context(), original); err != nil {
+	if err := devices.Insert(t.Context(), original); err != nil {
 		t.Fatalf("insert device: %v", err)
 	}
 	jsonType := echo.MIMEApplicationJSON
@@ -394,7 +453,7 @@ func TestHTTPUpdateDeviceLabels(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("patch status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	var updated device
+	var updated contract.Device
 	if err := json.Unmarshal(recorder.Body.Bytes(), &updated); err != nil {
 		t.Fatalf("decode device: %v", err)
 	}
@@ -421,7 +480,7 @@ func TestHTTPUpdateDeviceLabels(t *testing.T) {
 	}
 
 	recorder = doRequest(t, e, http.MethodGet, "/api/v1/devices/dev_test", "", "", nil)
-	var fetched device
+	var fetched contract.Device
 	if err := json.Unmarshal(recorder.Body.Bytes(), &fetched); err != nil {
 		t.Fatalf("decode fetched device: %v", err)
 	}
@@ -432,7 +491,7 @@ func TestHTTPUpdateDeviceLabels(t *testing.T) {
 
 func TestHTTPUpdateDeviceRejectsInvalidInput(t *testing.T) {
 	e, devices, _, _ := newTestAPI(t)
-	if err := devices.insert(t.Context(), sampleDevice()); err != nil {
+	if err := devices.Insert(t.Context(), sampleDevice()); err != nil {
 		t.Fatalf("insert device: %v", err)
 	}
 	jsonType := echo.MIMEApplicationJSON
@@ -466,7 +525,7 @@ func TestHTTPUpdateDeviceRejectsInvalidInput(t *testing.T) {
 
 func TestHTTPUpdateRemovedDeviceReturnsGone(t *testing.T) {
 	e, devices, _, _ := newTestAPI(t)
-	if err := devices.insert(t.Context(), sampleDevice()); err != nil {
+	if err := devices.Insert(t.Context(), sampleDevice()); err != nil {
 		t.Fatalf("insert device: %v", err)
 	}
 	recorder := doRequest(t, e, http.MethodDelete, "/api/v1/devices/dev_test", "", "", nil)

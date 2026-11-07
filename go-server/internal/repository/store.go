@@ -1,4 +1,6 @@
-package main
+// Package repository owns the GORM row models, the Turso connection and the
+// persistence operations used by the service layer.
+package repository
 
 import (
 	"database/sql"
@@ -8,6 +10,8 @@ import (
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 	turso "turso.tech/database/tursogo-serverless"
+
+	"esp32controlserver/internal/contract"
 )
 
 // The GORM models keep the existing table and column names so a database
@@ -43,13 +47,13 @@ type idempotencyRow struct {
 
 func (idempotencyRow) TableName() string { return "idempotency" }
 
-// openDatabase connects GORM to Turso. The GORM sqlite dialector supplies the
-// SQLite SQL and migration behavior; it runs on the connection provided by the
+// Open connects GORM to Turso. The GORM sqlite dialector supplies the SQLite
+// SQL and migration behavior; it runs on the connection provided by the
 // pure-Go Turso serverless driver instead of opening a local database file.
 //
 // The ":memory:" branch is reserved for tests. It uses mattn/go-sqlite3 through
 // the same dialector, so tests exercise the same SQL dialect as production.
-func openDatabase(databaseURL, authToken string) (*gorm.DB, error) {
+func Open(databaseURL, authToken string) (*gorm.DB, error) {
 	var sqlDB *sql.DB
 	if databaseURL == ":memory:" {
 		var err error
@@ -76,4 +80,20 @@ func openDatabase(databaseURL, authToken string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("migrate turso database: %w", err)
 	}
 	return db, nil
+}
+
+func (row deviceRow) toDevice() contract.Device {
+	return contract.Device{
+		ID:       row.ID,
+		Name:     row.Name,
+		Location: row.Location,
+		CodeOn:   row.CodeOn,
+		CodeOff:  row.CodeOff,
+		RF: contract.RFParameters{
+			Protocol: row.RFProtocol,
+			Length:   row.RFLength,
+			Repeat:   row.RFRepeat,
+		},
+		CreatedAtEpochMs: row.CreatedAtEpochMs,
+	}
 }

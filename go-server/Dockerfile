@@ -24,6 +24,7 @@ WORKDIR /src
 COPY go-server/go.mod go-server/go.sum ./
 RUN go mod download
 COPY go-server/*.go ./
+COPY go-server/internal ./internal
 RUN CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/esp32-control-server .
 
 FROM debian:bookworm-slim

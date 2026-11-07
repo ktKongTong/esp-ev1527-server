@@ -1,35 +1,46 @@
-package main
+package service
 
 import (
 	"context"
 	"fmt"
 	"testing"
+
+	"esp32controlserver/internal/contract"
+	"esp32controlserver/internal/repository"
 )
 
-func newTestLearningService(t *testing.T) (*learningService, *deviceRepository, *gatewayStatusStore, *fakeTransmitter, *int64) {
+func newTestLearningService(t *testing.T) (
+	*LearningService,
+	*repository.DeviceRepository,
+	*GatewayStatusStore,
+	*fakeTransmitter,
+	*int64,
+) {
 	t.Helper()
 	db := newTestDB(t)
-	devices := &deviceRepository{db: db}
+	devices := repository.NewDeviceRepository(db)
 	gateway := newOnlineGateway()
 	transmitter := &fakeTransmitter{}
-	service := newLearningService(db, devices, gateway, transmitter)
 	now := int64(1_000_000)
-	service.now = func() int64 { return now }
 	counter := 0
-	service.newID = func(prefix string) string {
-		counter++
-		return fmt.Sprintf("%s_%d", prefix, counter)
-	}
-	return service, devices, gateway, transmitter, &now
+	learning := NewLearningService(
+		db, devices, gateway, transmitter,
+		WithNow(func() int64 { return now }),
+		WithIDGenerator(func(prefix string) string {
+			counter++
+			return fmt.Sprintf("%s_%d", prefix, counter)
+		}),
+	)
+	return learning, devices, gateway, transmitter, &now
 }
 
-func press(t *testing.T, service *learningService, now *int64, code int64, times int) {
+func press(t *testing.T, learning *LearningService, now *int64, code int64, times int) {
 	t.Helper()
 	for i := 0; i < times; i++ {
 		// Separate each press from the previous frame by at least the gap the
 		// state machine treats as a new physical press.
 		*now += pressGapMs
-		service.onCapture(context.Background(), rfCapture{
+		learning.OnCapture(context.Background(), rfCapture{
 			Value:    code,
 			Protocol: 1,
 			Length:   24,
@@ -43,11 +54,11 @@ func TestLearningHappyPath(t *testing.T) {
 	ctx := context.Background()
 	sample := sampleDevice()
 
-	session, err := service.start(startLearningRequest{})
+	session, err := service.Start(contract.StartLearningRequest{})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if session.State != learningCollectingOn || session.RequiredHits != 3 {
+	if session.State != contract.LearningCollectingOn || session.RequiredHits != 3 {
 		t.Fatalf("unexpected session: %+v", session)
 	}
 	if session.Candidates == nil {
@@ -56,12 +67,12 @@ func TestLearningHappyPath(t *testing.T) {
 
 	// One physical press produces three frames within 400ms. It counts once.
 	for i := 0; i < 3; i++ {
-		service.onCapture(ctx, rfCapture{
+		service.OnCapture(ctx, rfCapture{
 			Value: sample.CodeOn, Protocol: 1, Length: 24, DelayMs: 330,
 		}, *now)
 		*now += 100
 	}
-	current, err := service.getLearning(session.ID)
+	current, err := service.GetLearning(session.ID)
 	if err != nil {
 		t.Fatalf("get after first press: %v", err)
 	}
@@ -70,19 +81,22 @@ func TestLearningHappyPath(t *testing.T) {
 	}
 	candidate := current.Candidates[0]
 	if candidate.HitCount != 1 || candidate.FrameCount != 3 {
-		t.Fatalf("hitCount=%d frameCount=%d, want 1/3", candidate.HitCount, candidate.FrameCount)
+		t.Fatalf(
+			"hitCount=%d frameCount=%d, want 1/3",
+			candidate.HitCount, candidate.FrameCount,
+		)
 	}
-	if current.State != learningCollectingOn {
+	if current.State != contract.LearningCollectingOn {
 		t.Fatalf("state = %s, want collecting_on", current.State)
 	}
 
 	// Two more independent presses reach the required hit count.
 	press(t, service, now, sample.CodeOn, 2)
-	current, err = service.getLearning(session.ID)
+	current, err = service.GetLearning(session.ID)
 	if err != nil {
 		t.Fatalf("get after qualification: %v", err)
 	}
-	if current.State != learningCandidateOnReady {
+	if current.State != contract.LearningCandidateOnReady {
 		t.Fatalf("state = %s, want candidate_on_ready", current.State)
 	}
 	if !current.Candidates[0].Qualified || current.Candidates[0].HitCount != 3 {
@@ -92,36 +106,36 @@ func TestLearningHappyPath(t *testing.T) {
 		t.Fatal("candidate window must replace the collection window")
 	}
 
-	current, err = service.acceptCandidate(ctx, session.ID, current.Candidates[0].ID)
+	current, err = service.AcceptCandidate(ctx, session.ID, current.Candidates[0].ID)
 	if err != nil {
 		t.Fatalf("accept on: %v", err)
 	}
-	if current.State != learningCollectingOff {
+	if current.State != contract.LearningCollectingOff {
 		t.Fatalf("state = %s, want collecting_off", current.State)
 	}
 
 	press(t, service, now, sample.CodeOff, 3)
-	current, err = service.getLearning(session.ID)
+	current, err = service.GetLearning(session.ID)
 	if err != nil {
 		t.Fatalf("get after off presses: %v", err)
 	}
-	if current.State != learningCandidateOffReady {
+	if current.State != contract.LearningCandidateOffReady {
 		t.Fatalf("state = %s, want candidate_off_ready", current.State)
 	}
 	offCandidate := current.Candidates[len(current.Candidates)-1]
-	if offCandidate.Slot != learningSlotTurnOff || !offCandidate.Qualified {
+	if offCandidate.Slot != contract.LearningSlotTurnOff || !offCandidate.Qualified {
 		t.Fatalf("unexpected off candidate: %+v", offCandidate)
 	}
 
-	current, err = service.acceptCandidate(ctx, session.ID, offCandidate.ID)
+	current, err = service.AcceptCandidate(ctx, session.ID, offCandidate.ID)
 	if err != nil {
 		t.Fatalf("accept off: %v", err)
 	}
-	if current.State != learningReady {
+	if current.State != contract.LearningReady {
 		t.Fatalf("state = %s, want ready", current.State)
 	}
 
-	testResult, err := service.testLearning(ctx, session.ID, learningSlotTurnOn)
+	testResult, err := service.TestLearning(ctx, session.ID, contract.LearningSlotTurnOn)
 	if err != nil {
 		t.Fatalf("test: %v", err)
 	}
@@ -133,10 +147,12 @@ func TestLearningHappyPath(t *testing.T) {
 		t.Fatalf("unexpected test publish: %+v", calls)
 	}
 
-	confirmation, err := service.confirmLearning(ctx, session.ID, confirmLearningRequest{
-		Name:     "  pump  ",
-		Location: "  pond  ",
-	})
+	confirmation, err := service.ConfirmLearning(
+		ctx, session.ID, contract.ConfirmLearningRequest{
+			Name:     "  pump  ",
+			Location: "  pond  ",
+		},
+	)
 	if err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
@@ -149,11 +165,11 @@ func TestLearningHappyPath(t *testing.T) {
 	if confirmation.Device.RF.Repeat != 5 {
 		t.Fatalf("repeat = %d, want 5", confirmation.Device.RF.Repeat)
 	}
-	if confirmation.Session.State != learningCompleted {
+	if confirmation.Session.State != contract.LearningCompleted {
 		t.Fatalf("state = %s, want completed", confirmation.Session.State)
 	}
 
-	stored, err := devices.list(ctx)
+	stored, err := devices.List(ctx)
 	if err != nil {
 		t.Fatalf("list devices: %v", err)
 	}
@@ -164,18 +180,18 @@ func TestLearningHappyPath(t *testing.T) {
 
 func TestLearningExpiresWithoutSignal(t *testing.T) {
 	service, _, _, _, now := newTestLearningService(t)
-	session, err := service.start(startLearningRequest{})
+	session, err := service.Start(contract.StartLearningRequest{})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	*now += collectionWindowMs + 1
-	service.tick()
+	service.Tick()
 
-	current, err := service.getLearning(session.ID)
+	current, err := service.GetLearning(session.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if current.State != learningExpired || current.FailureReason == nil ||
+	if current.State != contract.LearningExpired || current.FailureReason == nil ||
 		*current.FailureReason != "no_signal" {
 		t.Fatalf("unexpected expired session: %+v", current)
 	}
@@ -183,19 +199,19 @@ func TestLearningExpiresWithoutSignal(t *testing.T) {
 
 func TestLearningExpiresInsufficientHits(t *testing.T) {
 	service, _, _, _, now := newTestLearningService(t)
-	session, err := service.start(startLearningRequest{})
+	session, err := service.Start(contract.StartLearningRequest{})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	press(t, service, now, sampleDevice().CodeOn, 1)
 	*now += collectionWindowMs + 1
-	service.tick()
+	service.Tick()
 
-	current, err := service.getLearning(session.ID)
+	current, err := service.GetLearning(session.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if current.State != learningExpired || current.FailureReason == nil ||
+	if current.State != contract.LearningExpired || current.FailureReason == nil ||
 		*current.FailureReason != "insufficient_hits" {
 		t.Fatalf("unexpected expired session: %+v", current)
 	}
@@ -203,14 +219,11 @@ func TestLearningExpiresInsufficientHits(t *testing.T) {
 
 func TestLearningBusy(t *testing.T) {
 	service, _, _, _, _ := newTestLearningService(t)
-	if _, err := service.start(startLearningRequest{}); err != nil {
+	if _, err := service.Start(contract.StartLearningRequest{}); err != nil {
 		t.Fatalf("first start: %v", err)
 	}
-	_, err := service.start(startLearningRequest{})
-	apiErr, ok := err.(*apiError)
-	if !ok || apiErr.Code != "learning_busy" {
-		t.Fatalf("second start error = %v, want learning_busy", err)
-	}
+	_, err := service.Start(contract.StartLearningRequest{})
+	apiErr := requireAPIError(t, err, 409, "learning_busy")
 	if apiErr.Details["activeSessionId"] == "" {
 		t.Fatal("learning_busy must carry the active session id")
 	}
@@ -218,18 +231,18 @@ func TestLearningBusy(t *testing.T) {
 
 func TestLearningGatewayOfflineFailsCollection(t *testing.T) {
 	service, _, gateway, _, now := newTestLearningService(t)
-	session, err := service.start(startLearningRequest{})
+	session, err := service.Start(contract.StartLearningRequest{})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	gateway.setGateway(gatewayOffline, nil)
-	service.onGatewayOffline(*now)
+	gateway.SetGateway(contract.GatewayOffline, nil)
+	service.OnGatewayOffline(*now)
 
-	current, err := service.getLearning(session.ID)
+	current, err := service.GetLearning(session.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if current.State != learningFailed || current.FailureReason == nil ||
+	if current.State != contract.LearningFailed || current.FailureReason == nil ||
 		*current.FailureReason != "gateway_offline" {
 		t.Fatalf("unexpected failed session: %+v", current)
 	}
@@ -239,23 +252,20 @@ func TestLearningRejectsOwnedCode(t *testing.T) {
 	service, devices, _, _, now := newTestLearningService(t)
 	ctx := context.Background()
 	sample := sampleDevice()
-	if err := devices.insert(ctx, sample); err != nil {
+	if err := devices.Insert(ctx, sample); err != nil {
 		t.Fatalf("insert device: %v", err)
 	}
-	session, err := service.start(startLearningRequest{})
+	session, err := service.Start(contract.StartLearningRequest{})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	press(t, service, now, sample.CodeOn, 3)
-	current, err := service.getLearning(session.ID)
+	current, err := service.GetLearning(session.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	_, err = service.acceptCandidate(ctx, session.ID, current.Candidates[0].ID)
-	apiErr, ok := err.(*apiError)
-	if !ok || apiErr.Code != "code_already_registered" || apiErr.Status != 409 {
-		t.Fatalf("accept error = %v, want code_already_registered", err)
-	}
+	_, err = service.AcceptCandidate(ctx, session.ID, current.Candidates[0].ID)
+	apiErr := requireAPIError(t, err, 409, "code_already_registered")
 	if apiErr.Details["deviceId"] != sample.ID {
 		t.Fatalf("details = %+v", apiErr.Details)
 	}
@@ -264,37 +274,37 @@ func TestLearningRejectsOwnedCode(t *testing.T) {
 func TestLearningConfirmRejectsAddressMismatch(t *testing.T) {
 	service, _, _, _, now := newTestLearningService(t)
 	ctx := context.Background()
-	session, err := service.start(startLearningRequest{})
+	session, err := service.Start(contract.StartLearningRequest{})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	on := int64(1714739)
 	off := int64(0x500000)
 	press(t, service, now, on, 3)
-	current, err := service.getLearning(session.ID)
+	current, err := service.GetLearning(session.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	current, err = service.acceptCandidate(ctx, session.ID, current.Candidates[0].ID)
+	current, err = service.AcceptCandidate(ctx, session.ID, current.Candidates[0].ID)
 	if err != nil {
 		t.Fatalf("accept on: %v", err)
 	}
 	press(t, service, now, off, 3)
-	current, err = service.getLearning(session.ID)
+	current, err = service.GetLearning(session.ID)
 	if err != nil {
 		t.Fatalf("get off: %v", err)
 	}
 	offCandidate := current.Candidates[len(current.Candidates)-1]
-	current, err = service.acceptCandidate(ctx, session.ID, offCandidate.ID)
+	current, err = service.AcceptCandidate(ctx, session.ID, offCandidate.ID)
 	if err != nil {
 		t.Fatalf("accept off: %v", err)
 	}
-	_, err = service.confirmLearning(ctx, session.ID, confirmLearningRequest{
+	_, err = service.ConfirmLearning(ctx, session.ID, contract.ConfirmLearningRequest{
 		Name:     "pump",
 		Location: "pond",
 	})
-	apiErr, ok := err.(*apiError)
-	if !ok || apiErr.Code != "code_pair_invalid" || apiErr.Details["reason"] != "address_mismatch" {
-		t.Fatalf("confirm error = %v, want address_mismatch", err)
+	apiErr := requireAPIError(t, err, 422, "code_pair_invalid")
+	if apiErr.Details["reason"] != "address_mismatch" {
+		t.Fatalf("details = %+v", apiErr.Details)
 	}
 }

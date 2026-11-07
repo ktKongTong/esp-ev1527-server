@@ -26,8 +26,8 @@ server 作为客户端和网关沟通的中间节点，需要完成以下内容�
   与上一版服务端的表结构兼容。
 - MQTT：paho 提供 MQTT 3.1.1、QoS 1、keepalive 与自动重连。MQTT 是必需配置：
   未设置 `MQTT_HOST` 时启动失败，没有本地降级模式。
-- 配置读取顺序为环境变量 → `CONFIG_FILE` → `.env` → `go-server/.env` →
-  `server/.env`（legacy）。环境变量优先。
+- 配置只读取工作目录中的 `.env`（存在则加载，缺失则跳过），环境变量优先；
+  不支持 `CONFIG_FILE` 或目录搜索。
 - 鉴权：`AUTH_TOKEN` 必填，未设置时启动失败。除 `/` 与
   `GET /api/v1/health` 外，所有接口要求 `Authorization: Bearer <token>`；
   校验由 Echo `middleware.KeyAuth` 完成，比较使用 `crypto/subtle` 常量时间。

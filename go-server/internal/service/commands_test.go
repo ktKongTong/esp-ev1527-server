@@ -1,21 +1,33 @@
-package main
+package service
 
 import (
 	"context"
 	"errors"
 	"testing"
+
+	"esp32controlserver/internal/contract"
+	"esp32controlserver/internal/repository"
 )
 
-func newTestCommandService(t *testing.T) (*commandService, *deviceRepository, *idempotencyRepository, *gatewayStatusStore, *fakeTransmitter, *int64) {
+func newTestCommandService(t *testing.T) (
+	*CommandService,
+	*repository.DeviceRepository,
+	*repository.IdempotencyRepository,
+	*GatewayStatusStore,
+	*fakeTransmitter,
+	*int64,
+) {
 	t.Helper()
 	db := newTestDB(t)
-	devices := &deviceRepository{db: db}
-	idempotency := &idempotencyRepository{db: db}
+	devices := repository.NewDeviceRepository(db)
+	idempotency := repository.NewIdempotencyRepository(db)
 	gateway := newOnlineGateway()
 	transmitter := &fakeTransmitter{}
-	service := newCommandService(db, devices, idempotency, gateway, transmitter)
 	now := int64(1_000_000)
-	service.now = func() int64 { return now }
+	service := NewCommandService(
+		db, devices, idempotency, gateway, transmitter,
+		WithNow(func() int64 { return now }),
+	)
 	return service, devices, idempotency, gateway, transmitter, &now
 }
 
@@ -23,11 +35,11 @@ func TestCommandDispatchAndReplay(t *testing.T) {
 	service, devices, idempotency, _, transmitter, now := newTestCommandService(t)
 	ctx := context.Background()
 	sample := sampleDevice()
-	if err := devices.insert(ctx, sample); err != nil {
+	if err := devices.Insert(ctx, sample); err != nil {
 		t.Fatalf("insert device: %v", err)
 	}
 
-	first, replayed, err := service.issue(ctx, sample.ID, actionTurnOn, "key-1")
+	first, replayed, err := service.Issue(ctx, sample.ID, contract.ActionTurnOn, "key-1")
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}
@@ -43,7 +55,7 @@ func TestCommandDispatchAndReplay(t *testing.T) {
 	}
 
 	*now += 5_000
-	second, replayed, err := service.issue(ctx, sample.ID, actionTurnOn, "key-1")
+	second, replayed, err := service.Issue(ctx, sample.ID, contract.ActionTurnOn, "key-1")
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
@@ -51,24 +63,27 @@ func TestCommandDispatchAndReplay(t *testing.T) {
 		t.Fatal("second dispatch with the same key must be a replay")
 	}
 	if second.DispatchedAtEpochMs != first.DispatchedAtEpochMs {
-		t.Fatalf("replay timestamp = %d, want %d", second.DispatchedAtEpochMs, first.DispatchedAtEpochMs)
+		t.Fatalf(
+			"replay timestamp = %d, want %d",
+			second.DispatchedAtEpochMs, first.DispatchedAtEpochMs,
+		)
 	}
 	if len(transmitter.calls()) != 1 {
 		t.Fatal("replay must not publish again")
 	}
 
-	_, _, err = service.issue(ctx, sample.ID, actionTurnOff, "key-1")
+	_, _, err = service.Issue(ctx, sample.ID, contract.ActionTurnOff, "key-1")
 	requireAPIError(t, err, 409, "idempotency_conflict")
 
-	_, _, err = service.issue(ctx, sample.ID, actionTurnOn, "")
+	_, _, err = service.Issue(ctx, sample.ID, contract.ActionTurnOn, "")
 	requireAPIError(t, err, 400, "invalid_request")
 
-	_, _, err = service.issue(ctx, sample.ID, "toggle", "key-2")
+	_, _, err = service.Issue(ctx, sample.ID, "toggle", "key-2")
 	requireAPIError(t, err, 400, "invalid_request")
 
 	// The key expires with the 10-minute idempotency window.
 	*now += idempotencyTTLMs + 1
-	third, replayed, err := service.issue(ctx, sample.ID, actionTurnOn, "key-1")
+	third, replayed, err := service.Issue(ctx, sample.ID, contract.ActionTurnOn, "key-1")
 	if err != nil {
 		t.Fatalf("issue after expiry: %v", err)
 	}
@@ -79,7 +94,7 @@ func TestCommandDispatchAndReplay(t *testing.T) {
 		t.Fatalf("publishes = %d, want 2", len(transmitter.calls()))
 	}
 
-	record, err := idempotency.find(ctx, "key-1")
+	record, err := idempotency.Find(ctx, "key-1")
 	if err != nil {
 		t.Fatalf("find idempotency record: %v", err)
 	}
@@ -92,17 +107,17 @@ func TestCommandRejectsOfflineGateway(t *testing.T) {
 	service, devices, idempotency, gateway, transmitter, _ := newTestCommandService(t)
 	ctx := context.Background()
 	sample := sampleDevice()
-	if err := devices.insert(ctx, sample); err != nil {
+	if err := devices.Insert(ctx, sample); err != nil {
 		t.Fatalf("insert device: %v", err)
 	}
-	gateway.setGateway(gatewayOffline, nil)
+	gateway.SetGateway(contract.GatewayOffline, nil)
 
-	_, _, err := service.issue(ctx, sample.ID, actionTurnOn, "key-offline")
+	_, _, err := service.Issue(ctx, sample.ID, contract.ActionTurnOn, "key-offline")
 	requireAPIError(t, err, 503, "gateway_unavailable")
 	if len(transmitter.calls()) != 0 {
 		t.Fatal("offline gateway must not publish")
 	}
-	record, err := idempotency.find(ctx, "key-offline")
+	record, err := idempotency.Find(ctx, "key-offline")
 	if err != nil {
 		t.Fatalf("find idempotency record: %v", err)
 	}
@@ -110,8 +125,10 @@ func TestCommandRejectsOfflineGateway(t *testing.T) {
 		t.Fatal("a rejected command must not reserve its idempotency key")
 	}
 
-	gateway.setGateway(gatewayOnline, nil)
-	if _, _, err := service.issue(ctx, sample.ID, actionTurnOn, "key-offline"); err != nil {
+	gateway.SetGateway(contract.GatewayOnline, nil)
+	if _, _, err := service.Issue(
+		ctx, sample.ID, contract.ActionTurnOn, "key-offline",
+	); err != nil {
 		t.Fatalf("issue after reconnect: %v", err)
 	}
 	if len(transmitter.calls()) != 1 {
@@ -123,15 +140,15 @@ func TestCommandPublishFailureReleasesKey(t *testing.T) {
 	service, devices, idempotency, _, transmitter, _ := newTestCommandService(t)
 	ctx := context.Background()
 	sample := sampleDevice()
-	if err := devices.insert(ctx, sample); err != nil {
+	if err := devices.Insert(ctx, sample); err != nil {
 		t.Fatalf("insert device: %v", err)
 	}
 	transmitter.err = errors.New("broker is down")
 
-	_, _, err := service.issue(ctx, sample.ID, actionTurnOn, "key-fail")
+	_, _, err := service.Issue(ctx, sample.ID, contract.ActionTurnOn, "key-fail")
 	requireAPIError(t, err, 503, "gateway_unavailable")
 
-	record, err := idempotency.find(ctx, "key-fail")
+	record, err := idempotency.Find(ctx, "key-fail")
 	if err != nil {
 		t.Fatalf("find idempotency record: %v", err)
 	}
@@ -140,7 +157,7 @@ func TestCommandPublishFailureReleasesKey(t *testing.T) {
 	}
 
 	transmitter.err = nil
-	if _, _, err := service.issue(ctx, sample.ID, actionTurnOn, "key-fail"); err != nil {
+	if _, _, err := service.Issue(ctx, sample.ID, contract.ActionTurnOn, "key-fail"); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 	if len(transmitter.calls()) != 1 {
@@ -152,19 +169,19 @@ func TestCommandInProgress(t *testing.T) {
 	service, devices, idempotency, _, _, now := newTestCommandService(t)
 	ctx := context.Background()
 	sample := sampleDevice()
-	if err := devices.insert(ctx, sample); err != nil {
+	if err := devices.Insert(ctx, sample); err != nil {
 		t.Fatalf("insert device: %v", err)
 	}
-	if err := idempotency.reserve(ctx, idempotencyRecord{
+	if err := idempotency.Reserve(ctx, repository.IdempotencyRecord{
 		IdempotencyKey:   "key-progress",
 		DeviceID:         sample.ID,
-		Action:           actionTurnOn,
+		Action:           contract.ActionTurnOn,
 		CreatedAtEpochMs: *now,
 	}); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
 
-	_, _, err := service.issue(ctx, sample.ID, actionTurnOn, "key-progress")
+	_, _, err := service.Issue(ctx, sample.ID, contract.ActionTurnOn, "key-progress")
 	requireAPIError(t, err, 409, "command_in_progress")
 }
 
@@ -172,25 +189,25 @@ func TestCommandRejectsRemovedAndUnknownDevices(t *testing.T) {
 	service, devices, _, _, _, now := newTestCommandService(t)
 	ctx := context.Background()
 	sample := sampleDevice()
-	if err := devices.insert(ctx, sample); err != nil {
+	if err := devices.Insert(ctx, sample); err != nil {
 		t.Fatalf("insert device: %v", err)
 	}
-	if err := devices.delete(ctx, sample.ID); err != nil {
+	if err := devices.Delete(ctx, sample.ID); err != nil {
 		t.Fatalf("delete device: %v", err)
 	}
-	if err := devices.addTombstone(ctx, sample.ID, *now); err != nil {
+	if err := devices.AddTombstone(ctx, sample.ID, *now); err != nil {
 		t.Fatalf("add tombstone: %v", err)
 	}
 
-	_, _, err := service.issue(ctx, sample.ID, actionTurnOn, "key-removed")
+	_, _, err := service.Issue(ctx, sample.ID, contract.ActionTurnOn, "key-removed")
 	apiErr := requireAPIError(t, err, 410, "device_removed")
 	if apiErr.Details["removedAtEpochMs"] != "1000000" {
 		t.Fatalf("details = %+v", apiErr.Details)
 	}
 
-	_, _, err = service.issue(ctx, "dev_missing", actionTurnOn, "key-missing")
+	_, _, err = service.Issue(ctx, "dev_missing", contract.ActionTurnOn, "key-missing")
 	requireAPIError(t, err, 404, "device_not_found")
 
-	_, _, err = service.issue(ctx, "bad id!", actionTurnOn, "key-invalid")
+	_, _, err = service.Issue(ctx, "bad id!", contract.ActionTurnOn, "key-invalid")
 	requireAPIError(t, err, 400, "invalid_device_id")
 }

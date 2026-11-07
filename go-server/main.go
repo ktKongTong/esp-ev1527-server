@@ -9,79 +9,82 @@ import (
 	"runtime/debug"
 	"syscall"
 	"time"
+
+	"esp32controlserver/internal/config"
+	"esp32controlserver/internal/contract"
+	"esp32controlserver/internal/logging"
+	"esp32controlserver/internal/mqtt"
+	"esp32controlserver/internal/repository"
+	"esp32controlserver/internal/server"
+	"esp32controlserver/internal/service"
 )
 
 func main() {
-	cfg, err := loadConfig()
+	cfg, err := config.LoadConfig()
 	if err != nil {
-		errorf("configuration error: %v", err)
+		logging.Errorf("configuration error: %v", err)
 		os.Exit(1)
 	}
-	setLogLevel(cfg.LogLevel)
-	infof(
+	logging.SetLevel(cfg.LogLevel)
+	logging.Infof(
 		"esp32-control-server %s (contract %s) logLevel=%s",
-		serverVersion, contractVersion, cfg.LogLevel,
+		contract.ServerVersion, contract.ContractVersion, cfg.LogLevel,
 	)
-	infof("%s", cfg.MQTT)
-	infof("%s", cfg.Auth)
-	infof(
+	logging.Infof("%s", cfg.MQTT)
+	logging.Infof("%s", cfg.Auth)
+	logging.Infof(
 		"http=%s database=%s subscribe=%s command=%s",
 		cfg.Host, cfg.Database, cfg.SubscribedTopic, cfg.CommandTopic,
 	)
 
-	startedAtEpochMs := nowEpochMs()
-	db, err := openDatabase(cfg.Database.URL, cfg.Database.Token)
+	db, err := repository.Open(cfg.Database.URL, cfg.Database.Token)
 	if err != nil {
-		errorf("database error: %v", err)
+		logging.Errorf("database error: %v", err)
 		os.Exit(1)
 	}
 
-	devices := &deviceRepository{db: db}
-	idempotency := &idempotencyRepository{db: db}
-	gateway := newGatewayStatusStore(cfg.GatewayClientID)
+	devices := repository.NewDeviceRepository(db)
+	idempotency := repository.NewIdempotencyRepository(db)
+	gateway := service.NewGatewayStatusStore(cfg.GatewayClientID)
 
 	// MQTT callbacks need the ingest service, while the services need the MQTT
 	// transmitter. The holder closes this wiring cycle without a god object.
-	var ingest *gatewayIngest
+	var ingest *service.GatewayIngest
 
-	transport := newMQTTTransport(
+	transport := mqtt.NewTransport(
 		cfg.MQTT,
 		cfg.SubscribedTopic,
 		func(topic string, payload []byte) {
 			if ingest != nil {
-				ingest.onMessage(topic, payload)
+				ingest.OnMessage(topic, payload)
 			}
 		},
 		func() {
 			if ingest != nil {
-				ingest.onDisconnected()
+				ingest.OnDisconnected()
 			}
 		},
 	)
-	transmitter := newMQTTTransmitter(transport, cfg.CommandTopic)
+	transmitter := mqtt.NewTransmitter(transport, cfg.CommandTopic)
 
-	commandService := newCommandService(db, devices, idempotency, gateway, transmitter)
-	deviceService := newDeviceService(db, devices)
-	learningService := newLearningService(db, devices, gateway, transmitter)
-	ingest = newGatewayIngest(cfg, gateway, learningService)
+	commandService := service.NewCommandService(
+		db, devices, idempotency, gateway, transmitter,
+	)
+	deviceService := service.NewDeviceService(db, devices)
+	learningService := service.NewLearningService(db, devices, gateway, transmitter)
+	ingest = service.NewGatewayIngest(cfg.MQTT.TopicPrefix, gateway, learningService)
 
-	api := &apiServer{
-		devices:          deviceService,
-		commands:         commandService,
-		learning:         learningService,
-		gateway:          gateway,
-		startedAtEpochMs: startedAtEpochMs,
-	}
-	server := newEchoServer(api, cfg.Auth)
+	api := server.NewAPI(deviceService, commandService, learningService, gateway)
+	httpServer := server.NewEcho(api, cfg.Auth)
 
 	go runBackgroundTasks(learningService, commandService, deviceService)
 
-	transport.start()
-	infof("HTTP server starting on %s", listenAddress(cfg))
+	transport.Start()
+	logging.Infof("HTTP server starting on %s", server.ListenAddress(cfg))
 
 	serverError := make(chan error, 1)
 	go func() {
-		serverError <- server.Start(listenAddress(cfg))
+		serverError <- httpServer.Start(server.ListenAddress(cfg))
 	}()
 
 	signals := make(chan os.Signal, 1)
@@ -89,24 +92,24 @@ func main() {
 	select {
 	case err := <-serverError:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errorf("HTTP server failed: %v", err)
+			logging.Errorf("HTTP server failed: %v", err)
 			os.Exit(1)
 		}
 	case <-signals:
-		infof("shutting down")
-		transport.close()
+		logging.Infof("shutting down")
+		transport.Close()
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := server.Shutdown(shutdownContext); err != nil {
-			errorf("HTTP shutdown failed: %v", err)
+		if err := httpServer.Shutdown(shutdownContext); err != nil {
+			logging.Errorf("HTTP shutdown failed: %v", err)
 		}
 	}
 }
 
 func runBackgroundTasks(
-	learning *learningService,
-	commands *commandService,
-	devices *deviceService,
+	learning *service.LearningService,
+	commands *service.CommandService,
+	devices *service.DeviceService,
 ) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -114,15 +117,16 @@ func runBackgroundTasks(
 		func() {
 			defer func() {
 				if recovered := recover(); recovered != nil {
-					errorf("background task panic: %v\n%s", recovered, debug.Stack())
+					logging.Errorf("background task panic: %v\n%s", recovered, debug.Stack())
 				}
 			}()
-			learning.tick()
-			if err := commands.purge(nowEpochMs()); err != nil {
-				errorf("background task failed: idempotency purge: %v", err)
+			now := time.Now().UnixMilli()
+			learning.Tick()
+			if err := commands.Purge(now); err != nil {
+				logging.Errorf("background task failed: idempotency purge: %v", err)
 			}
-			if err := devices.purge(nowEpochMs()); err != nil {
-				errorf("background task failed: tombstone purge: %v", err)
+			if err := devices.Purge(now); err != nil {
+				logging.Errorf("background task failed: tombstone purge: %v", err)
 			}
 		}()
 	}

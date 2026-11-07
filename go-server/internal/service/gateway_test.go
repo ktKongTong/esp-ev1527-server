@@ -1,6 +1,11 @@
-package main
+package service
 
-import "testing"
+import (
+	"testing"
+
+	"esp32controlserver/internal/contract"
+	"esp32controlserver/internal/repository"
+)
 
 func TestParseCapture(t *testing.T) {
 	cases := []struct {
@@ -79,34 +84,31 @@ func TestParseCapture(t *testing.T) {
 
 func TestGatewayIngestTransitions(t *testing.T) {
 	db := newTestDB(t)
-	devices := &deviceRepository{db: db}
-	gateway := newGatewayStatusStore("gw-test")
-	learning := newLearningService(db, devices, gateway, &fakeTransmitter{})
-	ingest := newGatewayIngest(
-		config{SubscribedTopic: "home/OpenMQTTGateway/#"},
-		gateway,
-		learning,
-	)
+	devices := repository.NewDeviceRepository(db)
+	gateway := NewGatewayStatusStore("gw-test")
+	learning := NewLearningService(db, devices, gateway, &fakeTransmitter{})
+	ingest := NewGatewayIngest("home/OpenMQTTGateway", gateway, learning)
 
-	if state := gateway.snapshot().State; state != gatewayUnknown {
+	if state := gateway.Snapshot().State; state != contract.GatewayUnknown {
 		t.Fatalf("initial state = %s, want unknown", state)
 	}
 
-	ingest.onMessage("home/OpenMQTTGateway/version", []byte(`"1.8.0"`))
-	snapshot := gateway.snapshot()
-	if snapshot.State != gatewayOnline {
+	ingest.OnMessage("home/OpenMQTTGateway/version", []byte(`"1.8.0"`))
+	snapshot := gateway.Snapshot()
+	if snapshot.State != contract.GatewayOnline {
 		t.Fatalf("state = %s, want online", snapshot.State)
 	}
 	if snapshot.Version == nil || *snapshot.Version != "1.8.0" {
 		t.Fatalf("version = %v", snapshot.Version)
 	}
 
-	ingest.onMessage(
+	ingest.OnMessage(
 		"home/OpenMQTTGateway/315_433/Pulses",
 		[]byte(`{"value":1714739,"protocol":1,"length":24,"delay":330}`),
 	)
-	snapshot = gateway.snapshot()
-	if snapshot.Receiver.State != receiverReceiving || snapshot.Receiver.CaptureCount != 1 {
+	snapshot = gateway.Snapshot()
+	if snapshot.Receiver.State != contract.ReceiverReceiving ||
+		snapshot.Receiver.CaptureCount != 1 {
 		t.Fatalf("receiver = %+v", snapshot.Receiver)
 	}
 	if snapshot.Receiver.LastCaptureAtEpochMs == nil {
@@ -114,78 +116,74 @@ func TestGatewayIngestTransitions(t *testing.T) {
 	}
 
 	// The protocol number is gateway metadata, so a different value still counts.
-	ingest.onMessage(
+	ingest.OnMessage(
 		"home/OpenMQTTGateway/315_433/Pulses",
 		[]byte(`{"value":1714739,"protocol":22,"length":24}`),
 	)
-	if snapshot = gateway.snapshot(); snapshot.Receiver.CaptureCount != 2 {
+	if snapshot = gateway.Snapshot(); snapshot.Receiver.CaptureCount != 2 {
 		t.Fatalf("capture count = %d, want 2", snapshot.Receiver.CaptureCount)
 	}
 
 	// A frame with the wrong length must not reach the receiver counter.
-	ingest.onMessage(
+	ingest.OnMessage(
 		"home/OpenMQTTGateway/315_433/Pulses",
 		[]byte(`{"value":1714739,"protocol":1,"length":23}`),
 	)
-	if snapshot = gateway.snapshot(); snapshot.Receiver.CaptureCount != 2 {
+	if snapshot = gateway.Snapshot(); snapshot.Receiver.CaptureCount != 2 {
 		t.Fatalf("capture count = %d, want 2", snapshot.Receiver.CaptureCount)
 	}
 
 	// Command echoes and topics outside the prefix are ignored.
-	ingest.onMessage(
+	ingest.OnMessage(
 		"home/OpenMQTTGateway/commands/MQTTto433",
 		[]byte(`{"value":1714739,"protocol":1,"length":24}`),
 	)
-	ingest.onMessage(
+	ingest.OnMessage(
 		"other/prefix/Pulses",
 		[]byte(`{"value":1714739,"protocol":1,"length":24}`),
 	)
-	if snapshot = gateway.snapshot(); snapshot.Receiver.CaptureCount != 2 {
+	if snapshot = gateway.Snapshot(); snapshot.Receiver.CaptureCount != 2 {
 		t.Fatalf("capture count = %d, want 2", snapshot.Receiver.CaptureCount)
 	}
 
-	ingest.onMessage("home/OpenMQTTGateway/LWT", []byte(`"offline"`))
-	snapshot = gateway.snapshot()
-	if snapshot.State != gatewayOffline {
+	ingest.OnMessage("home/OpenMQTTGateway/LWT", []byte(`"offline"`))
+	snapshot = gateway.Snapshot()
+	if snapshot.State != contract.GatewayOffline {
 		t.Fatalf("state = %s, want offline", snapshot.State)
 	}
-	if snapshot.Receiver.State != receiverUnknown {
+	if snapshot.Receiver.State != contract.ReceiverUnknown {
 		t.Fatalf("receiver = %s, want unknown", snapshot.Receiver.State)
 	}
 
 	// Reconnecting the broker alone keeps the gateway offline; only the
 	// retained LWT brings it back.
-	ingest.onDisconnected()
-	if snapshot = gateway.snapshot(); snapshot.State != gatewayOffline {
+	ingest.OnDisconnected()
+	if snapshot = gateway.Snapshot(); snapshot.State != contract.GatewayOffline {
 		t.Fatalf("state = %s, want offline", snapshot.State)
 	}
-	ingest.onMessage("home/OpenMQTTGateway/LWT", []byte(`"online"`))
-	snapshot = gateway.snapshot()
-	if snapshot.State != gatewayOnline {
+	ingest.OnMessage("home/OpenMQTTGateway/LWT", []byte(`"online"`))
+	snapshot = gateway.Snapshot()
+	if snapshot.State != contract.GatewayOnline {
 		t.Fatalf("state = %s, want online", snapshot.State)
 	}
 }
 
 func TestGatewayCaptureFeedsLearning(t *testing.T) {
 	db := newTestDB(t)
-	devices := &deviceRepository{db: db}
+	devices := repository.NewDeviceRepository(db)
 	gateway := newOnlineGateway()
-	learning := newLearningService(db, devices, gateway, &fakeTransmitter{})
-	ingest := newGatewayIngest(
-		config{SubscribedTopic: "home/OpenMQTTGateway/#"},
-		gateway,
-		learning,
-	)
+	learning := NewLearningService(db, devices, gateway, &fakeTransmitter{})
+	ingest := NewGatewayIngest("home/OpenMQTTGateway", gateway, learning)
 
-	session, err := learning.start(startLearningRequest{})
+	session, err := learning.Start(contract.StartLearningRequest{})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	ingest.onMessage(
+	ingest.OnMessage(
 		"home/OpenMQTTGateway/315_433/Pulses",
 		[]byte(`{"value":1714739,"protocol":1,"length":24,"delay":330}`),
 	)
-	current, err := learning.getLearning(session.ID)
+	current, err := learning.GetLearning(session.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -196,26 +194,22 @@ func TestGatewayCaptureFeedsLearning(t *testing.T) {
 
 func TestGatewayOfflineFailsActiveCollection(t *testing.T) {
 	db := newTestDB(t)
-	devices := &deviceRepository{db: db}
+	devices := repository.NewDeviceRepository(db)
 	gateway := newOnlineGateway()
-	learning := newLearningService(db, devices, gateway, &fakeTransmitter{})
-	ingest := newGatewayIngest(
-		config{SubscribedTopic: "home/OpenMQTTGateway/#"},
-		gateway,
-		learning,
-	)
+	learning := NewLearningService(db, devices, gateway, &fakeTransmitter{})
+	ingest := NewGatewayIngest("home/OpenMQTTGateway", gateway, learning)
 
-	session, err := learning.start(startLearningRequest{})
+	session, err := learning.Start(contract.StartLearningRequest{})
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	ingest.onMessage("home/OpenMQTTGateway/LWT", []byte(`"offline"`))
+	ingest.OnMessage("home/OpenMQTTGateway/LWT", []byte(`"offline"`))
 
-	current, err := learning.getLearning(session.ID)
+	current, err := learning.GetLearning(session.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if current.State != learningFailed || current.FailureReason == nil ||
+	if current.State != contract.LearningFailed || current.FailureReason == nil ||
 		*current.FailureReason != "gateway_offline" {
 		t.Fatalf("unexpected session: %+v", current)
 	}

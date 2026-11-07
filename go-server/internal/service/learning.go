@@ -1,13 +1,19 @@
-package main
+package service
 
 import (
 	"context"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
 
 	"gorm.io/gorm"
+
+	"esp32controlserver/internal/apierror"
+	"esp32controlserver/internal/contract"
+	"esp32controlserver/internal/logging"
+	"esp32controlserver/internal/repository"
 )
 
 const (
@@ -23,7 +29,8 @@ const (
 
 func isTerminalLearningState(state string) bool {
 	switch state {
-	case learningCompleted, learningCancelled, learningExpired, learningFailed:
+	case contract.LearningCompleted, contract.LearningCancelled,
+		contract.LearningExpired, contract.LearningFailed:
 		return true
 	default:
 		return false
@@ -33,121 +40,130 @@ func isTerminalLearningState(state string) bool {
 // learningRecord adds the server-only lifecycle fields that are not part of
 // the wire contract.
 type learningRecord struct {
-	session           learningSession
+	session           contract.LearningSession
 	active            bool
 	terminalAtEpochMs *int64
 	deviceID          *string
 }
 
-type learningService struct {
+type LearningService struct {
 	mu          sync.Mutex
 	db          *gorm.DB
-	devices     *deviceRepository
-	gateway     *gatewayStatusStore
-	transmitter rfTransmitter
+	devices     *repository.DeviceRepository
+	gateway     *GatewayStatusStore
+	transmitter RFTransmitter
 	sessions    map[string]*learningRecord
 	now         func() int64
 	newID       func(string) string
 }
 
-func newLearningService(
+func NewLearningService(
 	db *gorm.DB,
-	devices *deviceRepository,
-	gateway *gatewayStatusStore,
-	transmitter rfTransmitter,
-) *learningService {
-	return &learningService{
+	devices *repository.DeviceRepository,
+	gateway *GatewayStatusStore,
+	transmitter RFTransmitter,
+	opts ...Option,
+) *LearningService {
+	resolved := resolveOptions(opts)
+	return &LearningService{
 		db:          db,
 		devices:     devices,
 		gateway:     gateway,
 		transmitter: transmitter,
 		sessions:    make(map[string]*learningRecord),
-		now:         nowEpochMs,
-		newID:       newID,
+		now:         resolved.now,
+		newID:       resolved.newID,
 	}
 }
 
-func (s *learningService) start(request startLearningRequest) (learningSession, error) {
+func (s *LearningService) Start(
+	request contract.StartLearningRequest,
+) (contract.LearningSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := s.now()
 	s.purgeLocked(now)
 
-	status := s.gateway.snapshot()
-	if status.State != gatewayOnline {
-		warnf(
+	status := s.gateway.Snapshot()
+	if status.State != contract.GatewayOnline {
+		logging.Warnf(
 			"[learning] start rejected: gateway=%s receiver=%s",
 			status.State, status.Receiver.State,
 		)
-		return learningSession{}, unavailable("gateway_unavailable", "Gateway is not online")
+		return contract.LearningSession{}, apierror.Unavailable(
+			"gateway_unavailable",
+			"Gateway is not online",
+		)
 	}
-	if status.Receiver.State == receiverUnavailable {
-		warnf("[learning] start rejected: receiver unavailable")
-		return learningSession{}, unavailable(
+	if status.Receiver.State == contract.ReceiverUnavailable {
+		logging.Warnf("[learning] start rejected: receiver unavailable")
+		return contract.LearningSession{}, apierror.Unavailable(
 			"receiver_unavailable",
 			"The 315MHz receiver is unavailable",
 		)
 	}
 	if active := s.activeLocked(); active != nil {
-		warnf(
+		logging.Warnf(
 			"[learning] start rejected: session %s already active (%s)",
 			active.session.ID, active.session.State,
 		)
-		return learningSession{}, newAPIErrorDetails(
-			409,
+		return contract.LearningSession{}, apierror.NewDetails(
+			http.StatusConflict,
 			"learning_busy",
 			"A learning session is already active",
 			map[string]string{"activeSessionId": active.session.ID},
 		)
 	}
 	if request.NameHint != nil && utf8.RuneCountInString(*request.NameHint) > 64 {
-		return learningSession{}, invalidRequest("nameHint is too long")
+		return contract.LearningSession{}, apierror.InvalidRequest("nameHint is too long")
 	}
 	if request.LocationHint != nil && utf8.RuneCountInString(*request.LocationHint) > 64 {
-		return learningSession{}, invalidRequest("locationHint is too long")
+		return contract.LearningSession{}, apierror.InvalidRequest("locationHint is too long")
 	}
 
-	session := learningSession{
+	session := contract.LearningSession{
 		ID:                         s.newID("ls"),
-		State:                      learningCollectingOn,
+		State:                      contract.LearningCollectingOn,
 		Revision:                   1,
 		CreatedAtEpochMs:           now,
 		SessionExpiresAtEpochMs:    now + sessionTTLMs,
 		CollectionExpiresAtEpochMs: int64Ptr(now + collectionWindowMs),
-		Candidates:                 []learningCandidate{},
+		Candidates:                 []contract.LearningCandidate{},
 		RequiredHits:               requiredHits,
 	}
 	s.sessions[session.ID] = &learningRecord{session: session, active: true}
-	infof(
+	logging.Infof(
 		"[learning] session %s started: collect window %ds",
 		session.ID, collectionWindowMs/1000,
 	)
 	return session, nil
 }
 
-func (s *learningService) getLearning(sessionID string) (learningSession, error) {
+func (s *LearningService) GetLearning(
+	sessionID string,
+) (contract.LearningSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.purgeLocked(s.now())
 	record, ok := s.sessions[sessionID]
 	if !ok {
-		return learningSession{}, learningNotFound()
+		return contract.LearningSession{}, apierror.LearningNotFound()
 	}
 	return record.session, nil
 }
 
-func (s *learningService) acceptCandidate(
+func (s *LearningService) AcceptCandidate(
 	ctx context.Context,
 	sessionID, candidateID string,
-) (learningSession, error) {
+) (contract.LearningSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := s.now()
 	record, err := s.activeRecordLocked(sessionID)
 	if err != nil {
-		return learningSession{}, err
+		return contract.LearningSession{}, err
 	}
 	session := record.session
 	index := -1
@@ -158,8 +174,8 @@ func (s *learningService) acceptCandidate(
 		}
 	}
 	if index < 0 {
-		return learningSession{}, newAPIError(
-			404,
+		return contract.LearningSession{}, apierror.New(
+			http.StatusNotFound,
 			"candidate_not_found",
 			"Candidate not found",
 		)
@@ -170,49 +186,49 @@ func (s *learningService) acceptCandidate(
 		((session.AcceptedOnCandidateID != nil && *session.AcceptedOnCandidateID == candidate.ID) ||
 			(session.AcceptedOffCandidateID != nil && *session.AcceptedOffCandidateID == candidate.ID))
 	if alreadyAccepted {
-		debugf("[learning] accept %s ignored: already accepted", candidate.ID)
+		logging.Debugf("[learning] accept %s ignored: already accepted", candidate.ID)
 		return session, nil
 	}
 
 	state := session.State
-	if state != learningCandidateOnReady && state != learningCandidateOffReady {
-		warnf(
+	if state != contract.LearningCandidateOnReady && state != contract.LearningCandidateOffReady {
+		logging.Warnf(
 			"[learning] accept %s rejected: session %s state=%s",
 			candidate.ID, session.ID, state,
 		)
-		return learningSession{}, newAPIError(
-			409,
+		return contract.LearningSession{}, apierror.New(
+			http.StatusConflict,
 			"learning_not_ready",
 			"The session is not waiting for candidate confirmation",
 		)
 	}
-	currentSlot := learningSlotTurnOn
-	if state == learningCandidateOffReady {
-		currentSlot = learningSlotTurnOff
+	currentSlot := contract.LearningSlotTurnOn
+	if state == contract.LearningCandidateOffReady {
+		currentSlot = contract.LearningSlotTurnOff
 	}
 	if candidate.Slot != currentSlot || !candidate.Qualified || candidate.Accepted {
-		warnf(
+		logging.Warnf(
 			"[learning] accept %s rejected: slot=%s qualified=%t accepted=%t currentSlot=%s",
 			candidate.ID, candidate.Slot, candidate.Qualified, candidate.Accepted, currentSlot,
 		)
-		return learningSession{}, newAPIError(
-			409,
+		return contract.LearningSession{}, apierror.New(
+			http.StatusConflict,
 			"candidate_not_ready",
 			"Candidate cannot be accepted in the current state",
 		)
 	}
 
-	owner, err := s.devices.findOwner(ctx, candidate.Length, candidate.Value)
+	owner, err := s.devices.FindOwner(ctx, candidate.Length, candidate.Value)
 	if err != nil {
-		return learningSession{}, err
+		return contract.LearningSession{}, err
 	}
 	if owner != "" {
-		warnf(
+		logging.Warnf(
 			"[learning] accept %s rejected: code %d owned by %s",
 			candidate.ID, candidate.Value, owner,
 		)
-		return learningSession{}, newAPIErrorDetails(
-			409,
+		return contract.LearningSession{}, apierror.NewDetails(
+			http.StatusConflict,
 			"code_already_registered",
 			"RF code is already owned by another device",
 			map[string]string{
@@ -221,15 +237,21 @@ func (s *learningService) acceptCandidate(
 			},
 		)
 	}
-	if currentSlot == learningSlotTurnOn {
-		status := s.gateway.snapshot()
-		if status.State != gatewayOnline {
-			warnf("[learning] accept %s rejected: gateway=%s", candidate.ID, status.State)
-			return learningSession{}, unavailable("gateway_unavailable", "Gateway is not online")
+	if currentSlot == contract.LearningSlotTurnOn {
+		status := s.gateway.Snapshot()
+		if status.State != contract.GatewayOnline {
+			logging.Warnf(
+				"[learning] accept %s rejected: gateway=%s",
+				candidate.ID, status.State,
+			)
+			return contract.LearningSession{}, apierror.Unavailable(
+				"gateway_unavailable",
+				"Gateway is not online",
+			)
 		}
-		if status.Receiver.State == receiverUnavailable {
-			warnf("[learning] accept %s rejected: receiver unavailable", candidate.ID)
-			return learningSession{}, unavailable(
+		if status.Receiver.State == contract.ReceiverUnavailable {
+			logging.Warnf("[learning] accept %s rejected: receiver unavailable", candidate.ID)
+			return contract.LearningSession{}, apierror.Unavailable(
 				"receiver_unavailable",
 				"The 315MHz receiver is unavailable",
 			)
@@ -238,7 +260,7 @@ func (s *learningService) acceptCandidate(
 
 	acceptedCandidate := candidate
 	acceptedCandidate.Accepted = true
-	remaining := make([]learningCandidate, 0, len(session.Candidates))
+	remaining := make([]contract.LearningCandidate, 0, len(session.Candidates))
 	for _, value := range session.Candidates {
 		if value.ID == candidate.ID {
 			remaining = append(remaining, acceptedCandidate)
@@ -252,72 +274,78 @@ func (s *learningService) acceptCandidate(
 	updated.Candidates = remaining
 	updated.CollectionExpiresAtEpochMs = nil
 	updated.CandidateExpiresAtEpochMs = nil
-	if currentSlot == learningSlotTurnOn {
-		updated.State = learningCollectingOff
+	if currentSlot == contract.LearningSlotTurnOn {
+		updated.State = contract.LearningCollectingOff
 		updated.CollectionExpiresAtEpochMs = int64Ptr(now + collectionWindowMs)
 		updated.AcceptedOnCandidateID = stringPtr(candidate.ID)
 	} else {
-		updated.State = learningReady
+		updated.State = contract.LearningReady
 		updated.SessionExpiresAtEpochMs = now + readyWindowMs
 		updated.AcceptedOffCandidateID = stringPtr(candidate.ID)
 	}
 
 	record.session = updated
-	infof(
+	logging.Infof(
 		"[learning] session %s accepted %s slot=%s value=%d -> %s",
 		sessionID, candidate.ID, currentSlot, candidate.Value, updated.State,
 	)
 	return updated, nil
 }
 
-func (s *learningService) rescan(ctx context.Context, sessionID string) (learningSession, error) {
+func (s *LearningService) Rescan(
+	ctx context.Context,
+	sessionID string,
+) (contract.LearningSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := s.now()
 	record, err := s.activeRecordLocked(sessionID)
 	if err != nil {
-		return learningSession{}, err
+		return contract.LearningSession{}, err
 	}
 	session := record.session
 	var slot string
 	switch session.State {
-	case learningCollectingOn, learningCandidateOnReady:
-		slot = learningSlotTurnOn
-	case learningCollectingOff, learningCandidateOffReady:
-		slot = learningSlotTurnOff
+	case contract.LearningCollectingOn, contract.LearningCandidateOnReady:
+		slot = contract.LearningSlotTurnOn
+	case contract.LearningCollectingOff, contract.LearningCandidateOffReady:
+		slot = contract.LearningSlotTurnOff
 	default:
-		warnf("[learning] rescan %s rejected: state=%s", session.ID, session.State)
-		return learningSession{}, newAPIError(
-			409,
+		logging.Warnf("[learning] rescan %s rejected: state=%s", session.ID, session.State)
+		return contract.LearningSession{}, apierror.New(
+			http.StatusConflict,
 			"learning_not_ready",
 			"The session cannot be rescanned in its current state",
 		)
 	}
-	status := s.gateway.snapshot()
-	if status.State != gatewayOnline {
-		warnf("[learning] rescan %s rejected: gateway=%s", session.ID, status.State)
-		return learningSession{}, unavailable("gateway_unavailable", "Gateway is not online")
+	status := s.gateway.Snapshot()
+	if status.State != contract.GatewayOnline {
+		logging.Warnf("[learning] rescan %s rejected: gateway=%s", session.ID, status.State)
+		return contract.LearningSession{}, apierror.Unavailable(
+			"gateway_unavailable",
+			"Gateway is not online",
+		)
 	}
-	if status.Receiver.State == receiverUnavailable {
-		warnf("[learning] rescan %s rejected: receiver unavailable", session.ID)
-		return learningSession{}, unavailable(
+	if status.Receiver.State == contract.ReceiverUnavailable {
+		logging.Warnf("[learning] rescan %s rejected: receiver unavailable", session.ID)
+		return contract.LearningSession{}, apierror.Unavailable(
 			"receiver_unavailable",
 			"The 315MHz receiver is unavailable",
 		)
 	}
 
-	candidates := make([]learningCandidate, 0, len(session.Candidates))
+	candidates := make([]contract.LearningCandidate, 0, len(session.Candidates))
 	for _, candidate := range session.Candidates {
 		if candidate.Slot != slot || candidate.Accepted {
 			candidates = append(candidates, candidate)
 		}
 	}
 	updated := session
-	if slot == learningSlotTurnOn {
-		updated.State = learningCollectingOn
+	if slot == contract.LearningSlotTurnOn {
+		updated.State = contract.LearningCollectingOn
 	} else {
-		updated.State = learningCollectingOff
+		updated.State = contract.LearningCollectingOff
 	}
 	updated.Revision = session.Revision + 1
 	updated.CollectionExpiresAtEpochMs = int64Ptr(now + collectionWindowMs)
@@ -325,16 +353,21 @@ func (s *learningService) rescan(ctx context.Context, sessionID string) (learnin
 	updated.Candidates = candidates
 
 	record.session = updated
-	infof("[learning] session %s rescanned: slot=%s -> %s", sessionID, slot, updated.State)
+	logging.Infof(
+		"[learning] session %s rescanned: slot=%s -> %s",
+		sessionID, slot, updated.State,
+	)
 	return updated, nil
 }
 
-func (s *learningService) testLearning(
+func (s *LearningService) TestLearning(
 	ctx context.Context,
 	sessionID, slot string,
-) (learningTestResult, error) {
-	if slot != learningSlotTurnOn && slot != learningSlotTurnOff {
-		return learningTestResult{}, invalidRequest("slot must be turn_on or turn_off")
+) (contract.LearningTestResult, error) {
+	if slot != contract.LearningSlotTurnOn && slot != contract.LearningSlotTurnOff {
+		return contract.LearningTestResult{}, apierror.InvalidRequest(
+			"slot must be turn_on or turn_off",
+		)
 	}
 	testID := s.newID("test")
 
@@ -342,36 +375,39 @@ func (s *learningService) testLearning(
 	record, err := s.activeRecordLocked(sessionID)
 	if err != nil {
 		s.mu.Unlock()
-		return learningTestResult{}, err
+		return contract.LearningTestResult{}, err
 	}
 	session := record.session
-	if session.State != learningReady {
-		warnf("[learning] test %s rejected: state=%s", session.ID, session.State)
+	if session.State != contract.LearningReady {
+		logging.Warnf("[learning] test %s rejected: state=%s", session.ID, session.State)
 		s.mu.Unlock()
-		return learningTestResult{}, newAPIError(
-			409,
+		return contract.LearningTestResult{}, apierror.New(
+			http.StatusConflict,
 			"learning_not_ready",
 			"The session is not ready for testing",
 		)
 	}
-	if !s.gateway.isOnline() {
-		warnf("[learning] test %s rejected: gateway offline", session.ID)
+	if !s.gateway.IsOnline() {
+		logging.Warnf("[learning] test %s rejected: gateway offline", session.ID)
 		s.mu.Unlock()
-		return learningTestResult{}, unavailable("gateway_unavailable", "Gateway is not online")
+		return contract.LearningTestResult{}, apierror.Unavailable(
+			"gateway_unavailable",
+			"Gateway is not online",
+		)
 	}
 	acceptedID := session.AcceptedOnCandidateID
-	if slot == learningSlotTurnOff {
+	if slot == contract.LearningSlotTurnOff {
 		acceptedID = session.AcceptedOffCandidateID
 	}
 	candidate := findAcceptedCandidate(session, acceptedID)
 	if candidate == nil {
-		warnf(
+		logging.Warnf(
 			"[learning] test %s rejected: no accepted candidate for slot=%s",
 			session.ID, slot,
 		)
 		s.mu.Unlock()
-		return learningTestResult{}, newAPIError(
-			409,
+		return contract.LearningTestResult{}, apierror.New(
+			http.StatusConflict,
 			"learning_not_ready",
 			"The requested slot has no accepted candidate",
 		)
@@ -380,21 +416,24 @@ func (s *learningService) testLearning(
 	s.mu.Unlock()
 
 	dispatchedAt := s.now()
-	if err := s.transmitter.Send(ctx, rfPayload{
+	if err := s.transmitter.Send(ctx, contract.RFPayload{
 		Value:    candidateCopy.Value,
 		Protocol: candidateCopy.Protocol,
 		Length:   candidateCopy.Length,
 		Repeat:   5,
 	}); err != nil {
-		errorf("[learning] test dispatch failed for session %s: %v", sessionID, err)
-		return learningTestResult{}, unavailable("gateway_unavailable", "Failed to publish test code")
+		logging.Errorf("[learning] test dispatch failed for session %s: %v", sessionID, err)
+		return contract.LearningTestResult{}, apierror.Unavailable(
+			"gateway_unavailable",
+			"Failed to publish test code",
+		)
 	}
 
-	infof(
+	logging.Infof(
 		"[learning] session %s test dispatched slot=%s value=%d",
 		sessionID, slot, candidateCopy.Value,
 	)
-	return learningTestResult{
+	return contract.LearningTestResult{
 		TestID:              testID,
 		SessionID:           sessionID,
 		Slot:                slot,
@@ -404,61 +443,66 @@ func (s *learningService) testLearning(
 	}, nil
 }
 
-func (s *learningService) confirmLearning(
+func (s *LearningService) ConfirmLearning(
 	ctx context.Context,
 	sessionID string,
-	request confirmLearningRequest,
-) (learningConfirmation, error) {
+	request contract.ConfirmLearningRequest,
+) (contract.LearningConfirmation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := s.now()
 	existing, ok := s.sessions[sessionID]
 	if !ok {
-		return learningConfirmation{}, learningNotFound()
+		return contract.LearningConfirmation{}, apierror.LearningNotFound()
 	}
 
-	if existing.session.State == learningCompleted {
+	if existing.session.State == contract.LearningCompleted {
 		if existing.deviceID == nil {
-			return learningConfirmation{}, newAPIError(
-				409,
+			return contract.LearningConfirmation{}, apierror.New(
+				http.StatusConflict,
 				"learning_not_ready",
 				"Learning session is already completed",
 			)
 		}
-		found, err := s.devices.find(ctx, *existing.deviceID)
+		found, err := s.devices.Find(ctx, *existing.deviceID)
 		if err != nil {
-			return learningConfirmation{}, err
+			return contract.LearningConfirmation{}, err
 		}
 		if found != nil {
-			return learningConfirmation{Device: *found, Session: existing.session}, nil
+			return contract.LearningConfirmation{
+				Device:  *found,
+				Session: existing.session,
+			}, nil
 		}
-		tombstone, err := s.devices.findTombstone(ctx, *existing.deviceID)
+		tombstone, err := s.devices.FindTombstone(ctx, *existing.deviceID)
 		if err != nil {
-			return learningConfirmation{}, err
+			return contract.LearningConfirmation{}, err
 		}
 		if tombstone != nil {
-			return learningConfirmation{}, deviceRemoved(tombstone.RemovedAtEpochMs)
+			return contract.LearningConfirmation{}, apierror.DeviceRemoved(
+				tombstone.RemovedAtEpochMs,
+			)
 		}
-		return learningConfirmation{}, newAPIError(
-			410,
+		return contract.LearningConfirmation{}, apierror.New(
+			http.StatusGone,
 			"device_removed",
 			"Device was removed",
 		)
 	}
 	if !existing.active {
-		return learningConfirmation{}, newAPIError(
-			409,
+		return contract.LearningConfirmation{}, apierror.New(
+			http.StatusConflict,
 			"learning_not_ready",
 			"Learning session is no longer active",
 		)
 	}
 
 	session := existing.session
-	if session.State != learningReady {
-		warnf("[learning] confirm %s rejected: state=%s", session.ID, session.State)
-		return learningConfirmation{}, newAPIError(
-			409,
+	if session.State != contract.LearningReady {
+		logging.Warnf("[learning] confirm %s rejected: state=%s", session.ID, session.State)
+		return contract.LearningConfirmation{}, apierror.New(
+			http.StatusConflict,
 			"learning_not_ready",
 			"The session is not ready to save",
 		)
@@ -468,47 +512,57 @@ func (s *learningService) confirmLearning(
 	location := strings.TrimSpace(request.Location)
 	if utf8.RuneCountInString(name) == 0 || utf8.RuneCountInString(name) > 64 ||
 		utf8.RuneCountInString(location) == 0 || utf8.RuneCountInString(location) > 64 {
-		warnf("[learning] confirm %s rejected: invalid name or location", session.ID)
-		return learningConfirmation{}, invalidRequest("name and location must be 1-64 characters")
+		logging.Warnf("[learning] confirm %s rejected: invalid name or location", session.ID)
+		return contract.LearningConfirmation{}, apierror.InvalidRequest(
+			"name and location must be 1-64 characters",
+		)
 	}
 
-	on := findAcceptedCandidateForSlot(session, session.AcceptedOnCandidateID, learningSlotTurnOn)
+	on := findAcceptedCandidateForSlot(
+		session,
+		session.AcceptedOnCandidateID,
+		contract.LearningSlotTurnOn,
+	)
 	if on == nil {
-		return learningConfirmation{}, newAPIError(
-			409,
+		return contract.LearningConfirmation{}, apierror.New(
+			http.StatusConflict,
 			"learning_not_ready",
 			"Accepted ON candidate is missing",
 		)
 	}
-	off := findAcceptedCandidateForSlot(session, session.AcceptedOffCandidateID, learningSlotTurnOff)
+	off := findAcceptedCandidateForSlot(
+		session,
+		session.AcceptedOffCandidateID,
+		contract.LearningSlotTurnOff,
+	)
 	if off == nil {
-		return learningConfirmation{}, newAPIError(
-			409,
+		return contract.LearningConfirmation{}, apierror.New(
+			http.StatusConflict,
 			"learning_not_ready",
 			"Accepted OFF candidate is missing",
 		)
 	}
 	if on.Value == off.Value {
-		return learningConfirmation{}, codePairInvalid("same_code")
+		return contract.LearningConfirmation{}, apierror.CodePairInvalid("same_code")
 	}
 	if !ev1527Valid(on.Value) || !ev1527Valid(off.Value) {
-		return learningConfirmation{}, codePairInvalid("code_out_of_range")
+		return contract.LearningConfirmation{}, apierror.CodePairInvalid("code_out_of_range")
 	}
 	if !ev1527SameAddress(on.Value, off.Value) {
-		return learningConfirmation{}, codePairInvalid("address_mismatch")
+		return contract.LearningConfirmation{}, apierror.CodePairInvalid("address_mismatch")
 	}
 
-	var created device
+	var created contract.Device
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		devices := s.devices.withDB(tx)
-		for _, code := range []learningCandidate{*on, *off} {
-			owner, err := devices.findOwner(ctx, code.Length, code.Value)
+		devices := s.devices.WithDB(tx)
+		for _, code := range []contract.LearningCandidate{*on, *off} {
+			owner, err := devices.FindOwner(ctx, code.Length, code.Value)
 			if err != nil {
 				return err
 			}
 			if owner != "" {
-				return newAPIErrorDetails(
-					409,
+				return apierror.NewDetails(
+					http.StatusConflict,
 					"code_already_registered",
 					"RF code is already owned by another device",
 					map[string]string{
@@ -518,23 +572,23 @@ func (s *learningService) confirmLearning(
 				)
 			}
 		}
-		created = device{
+		created = contract.Device{
 			ID:               s.newID("dev"),
 			Name:             name,
 			Location:         location,
 			CodeOn:           on.Value,
 			CodeOff:          off.Value,
-			RF:               rfParameters{Protocol: on.Protocol, Length: on.Length, Repeat: 5},
+			RF:               contract.RFParameters{Protocol: on.Protocol, Length: on.Length, Repeat: 5},
 			CreatedAtEpochMs: now,
 		}
-		return devices.insert(ctx, created)
+		return devices.Insert(ctx, created)
 	})
 	if err != nil {
-		return learningConfirmation{}, err
+		return contract.LearningConfirmation{}, err
 	}
 
 	completed := session
-	completed.State = learningCompleted
+	completed.State = contract.LearningCompleted
 	completed.Revision = session.Revision + 1
 	completed.CollectionExpiresAtEpochMs = nil
 	completed.CandidateExpiresAtEpochMs = nil
@@ -545,29 +599,32 @@ func (s *learningService) confirmLearning(
 		terminalAtEpochMs: int64Ptr(now),
 		deviceID:          stringPtr(created.ID),
 	}
-	infof(
+	logging.Infof(
 		"[learning] session %s completed: device %s on=%d off=%d",
 		sessionID, created.ID, on.Value, off.Value,
 	)
-	return learningConfirmation{Device: created, Session: completed}, nil
+	return contract.LearningConfirmation{Device: created, Session: completed}, nil
 }
 
-func (s *learningService) cancelLearning(sessionID string) {
+func (s *LearningService) CancelLearning(sessionID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	record, ok := s.sessions[sessionID]
 	if !ok {
-		debugf("[learning] cancel %s ignored: session not found", sessionID)
+		logging.Debugf("[learning] cancel %s ignored: session not found", sessionID)
 		return
 	}
 	if isTerminalLearningState(record.session.State) {
-		debugf("[learning] cancel %s ignored: state=%s", sessionID, record.session.State)
+		logging.Debugf(
+			"[learning] cancel %s ignored: state=%s",
+			sessionID, record.session.State,
+		)
 		return
 	}
 
 	cancelled := record.session
-	cancelled.State = learningCancelled
+	cancelled.State = contract.LearningCancelled
 	cancelled.Revision = record.session.Revision + 1
 	cancelled.CollectionExpiresAtEpochMs = nil
 	cancelled.CandidateExpiresAtEpochMs = nil
@@ -575,12 +632,12 @@ func (s *learningService) cancelLearning(sessionID string) {
 	record.session = cancelled
 	record.active = false
 	record.terminalAtEpochMs = int64Ptr(now)
-	infof("[learning] session %s cancelled", sessionID)
+	logging.Infof("[learning] session %s cancelled", sessionID)
 }
 
-// onGatewayOffline fails a session that is still collecting. Candidate
+// OnGatewayOffline fails a session that is still collecting. Candidate
 // confirmation and ready states keep their evidence and their own timers.
-func (s *learningService) onGatewayOffline(now int64) {
+func (s *LearningService) OnGatewayOffline(now int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -589,59 +646,63 @@ func (s *learningService) onGatewayOffline(now int64) {
 		return
 	}
 	state := record.session.State
-	if state == learningCollectingOn || state == learningCollectingOff {
+	if state == contract.LearningCollectingOn || state == contract.LearningCollectingOff {
 		s.failLocked(record, "gateway_offline", now)
 	} else {
-		infof(
+		logging.Infof(
 			"[learning] gateway offline during session %s state=%s, session kept",
 			record.session.ID, state,
 		)
 	}
 }
 
-func (s *learningService) onCapture(ctx context.Context, capture rfCapture, now int64) {
+func (s *LearningService) OnCapture(
+	ctx context.Context,
+	capture rfCapture,
+	now int64,
+) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	record := s.activeLocked()
 	if record == nil {
-		debugf("[learning] capture %d ignored: no active session", capture.Value)
+		logging.Debugf("[learning] capture %d ignored: no active session", capture.Value)
 		return
 	}
 	session := record.session
 	state := session.State
-	if state != learningCollectingOn && state != learningCollectingOff {
-		debugf(
+	if state != contract.LearningCollectingOn && state != contract.LearningCollectingOff {
+		logging.Debugf(
 			"[learning] capture %d ignored: session %s state=%s (slot closed)",
 			capture.Value, session.ID, state,
 		)
 		return
 	}
 	if session.CollectionExpiresAtEpochMs == nil {
-		debugf(
+		logging.Debugf(
 			"[learning] capture %d ignored: session %s has no collection window",
 			capture.Value, session.ID,
 		)
 		return
 	}
 	if now >= *session.CollectionExpiresAtEpochMs {
-		debugf(
+		logging.Debugf(
 			"[learning] capture %d ignored: collection window ended %dms ago",
 			capture.Value, now-*session.CollectionExpiresAtEpochMs,
 		)
 		return
 	}
 	if !ev1527Valid(capture.Value) {
-		debugf(
+		logging.Debugf(
 			"[learning] capture %d ignored: value out of EV1527 range",
 			capture.Value,
 		)
 		return
 	}
 
-	slot := learningSlotTurnOn
-	if state == learningCollectingOff {
-		slot = learningSlotTurnOff
+	slot := contract.LearningSlotTurnOn
+	if state == contract.LearningCollectingOff {
+		slot = contract.LearningSlotTurnOff
 	}
 
 	existingIndex := -1
@@ -652,16 +713,16 @@ func (s *learningService) onCapture(ctx context.Context, capture rfCapture, now 
 		}
 	}
 	if existingIndex < 0 && len(session.Candidates) >= maxCandidates {
-		warnf(
+		logging.Warnf(
 			"[learning] capture %d dropped: candidate limit %d reached",
 			capture.Value, maxCandidates,
 		)
 		return
 	}
 
-	owner, err := s.devices.findOwner(ctx, capture.Length, capture.Value)
+	owner, err := s.devices.FindOwner(ctx, capture.Length, capture.Value)
 	if err != nil {
-		errorf("[learning] capture %d owner lookup failed: %v", capture.Value, err)
+		logging.Errorf("[learning] capture %d owner lookup failed: %v", capture.Value, err)
 		return
 	}
 	var conflict *string
@@ -669,9 +730,9 @@ func (s *learningService) onCapture(ctx context.Context, capture rfCapture, now 
 		conflict = stringPtr(owner)
 	}
 
-	var updatedCandidate learningCandidate
+	var updatedCandidate contract.LearningCandidate
 	if existingIndex < 0 {
-		updatedCandidate = learningCandidate{
+		updatedCandidate = contract.LearningCandidate{
 			ID:                 s.newID("cand"),
 			Slot:               slot,
 			Value:              capture.Value,
@@ -704,13 +765,13 @@ func (s *learningService) onCapture(ctx context.Context, capture rfCapture, now 
 	if conflict != nil {
 		conflictLabel = " conflict=" + *conflict
 	}
-	debugf(
+	logging.Debugf(
 		"[learning] capture %d slot=%s hits=%d/%d frames=%d%s",
 		capture.Value, slot, updatedCandidate.HitCount, requiredHits,
 		updatedCandidate.FrameCount, conflictLabel,
 	)
 
-	candidates := append([]learningCandidate(nil), session.Candidates...)
+	candidates := append([]contract.LearningCandidate(nil), session.Candidates...)
 	if existingIndex < 0 {
 		candidates = append(candidates, updatedCandidate)
 	} else {
@@ -731,10 +792,10 @@ func (s *learningService) onCapture(ctx context.Context, capture rfCapture, now 
 
 	updated := session
 	if qualifiedNow {
-		if slot == learningSlotTurnOn {
-			updated.State = learningCandidateOnReady
+		if slot == contract.LearningSlotTurnOn {
+			updated.State = contract.LearningCandidateOnReady
 		} else {
-			updated.State = learningCandidateOffReady
+			updated.State = contract.LearningCandidateOffReady
 		}
 	}
 	updated.Revision = session.Revision + 1
@@ -747,14 +808,14 @@ func (s *learningService) onCapture(ctx context.Context, capture rfCapture, now 
 	}
 	record.session = updated
 	if qualifiedNow {
-		infof(
+		logging.Infof(
 			"[learning] session %s slot=%s qualified value=%d -> %s",
 			session.ID, slot, capture.Value, updated.State,
 		)
 	}
 }
 
-func (s *learningService) tick() {
+func (s *LearningService) Tick() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -766,11 +827,11 @@ func (s *learningService) tick() {
 	}
 	active := record.session
 	switch active.State {
-	case learningCollectingOn, learningCollectingOff:
+	case contract.LearningCollectingOn, contract.LearningCollectingOff:
 		if active.CollectionExpiresAtEpochMs != nil && now >= *active.CollectionExpiresAtEpochMs {
-			slot := learningSlotTurnOn
-			if active.State == learningCollectingOff {
-				slot = learningSlotTurnOff
+			slot := contract.LearningSlotTurnOn
+			if active.State == contract.LearningCollectingOff {
+				slot = contract.LearningSlotTurnOff
 			}
 			hadSignal := false
 			for _, candidate := range active.Candidates {
@@ -789,20 +850,20 @@ func (s *learningService) tick() {
 		if now >= active.SessionExpiresAtEpochMs {
 			s.expireLocked(record, "session_timeout", now)
 		}
-	case learningCandidateOnReady, learningCandidateOffReady:
+	case contract.LearningCandidateOnReady, contract.LearningCandidateOffReady:
 		if active.CandidateExpiresAtEpochMs != nil && now >= *active.CandidateExpiresAtEpochMs {
 			s.expireLocked(record, "candidate_timeout", now)
 		} else if now >= active.SessionExpiresAtEpochMs {
 			s.expireLocked(record, "session_timeout", now)
 		}
-	case learningReady:
+	case contract.LearningReady:
 		if now >= active.SessionExpiresAtEpochMs {
 			s.expireLocked(record, "ready_timeout", now)
 		}
 	}
 }
 
-func (s *learningService) activeLocked() *learningRecord {
+func (s *LearningService) activeLocked() *learningRecord {
 	for _, record := range s.sessions {
 		if record.active {
 			return record
@@ -811,15 +872,17 @@ func (s *learningService) activeLocked() *learningRecord {
 	return nil
 }
 
-func (s *learningService) activeRecordLocked(sessionID string) (*learningRecord, error) {
+func (s *LearningService) activeRecordLocked(
+	sessionID string,
+) (*learningRecord, error) {
 	s.purgeLocked(s.now())
 	record, ok := s.sessions[sessionID]
 	if !ok {
-		return nil, learningNotFound()
+		return nil, apierror.LearningNotFound()
 	}
 	if isTerminalLearningState(record.session.State) || !record.active {
-		return nil, newAPIError(
-			409,
+		return nil, apierror.New(
+			http.StatusConflict,
 			"learning_not_ready",
 			"Learning session is no longer active",
 		)
@@ -827,15 +890,15 @@ func (s *learningService) activeRecordLocked(sessionID string) (*learningRecord,
 	return record, nil
 }
 
-func (s *learningService) failLocked(record *learningRecord, reason string, now int64) {
+func (s *LearningService) failLocked(record *learningRecord, reason string, now int64) {
 	failed := record.session
-	failed.State = learningFailed
+	failed.State = contract.LearningFailed
 	failed.Revision = record.session.Revision + 1
 	failed.CollectionExpiresAtEpochMs = nil
 	failed.CandidateExpiresAtEpochMs = nil
 	failed.FailureReason = stringPtr(reason)
 
-	warnf(
+	logging.Warnf(
 		"[learning] session %s failed: %s (was %s)",
 		record.session.ID, reason, record.session.State,
 	)
@@ -844,15 +907,15 @@ func (s *learningService) failLocked(record *learningRecord, reason string, now 
 	record.terminalAtEpochMs = int64Ptr(now)
 }
 
-func (s *learningService) expireLocked(record *learningRecord, reason string, now int64) {
+func (s *LearningService) expireLocked(record *learningRecord, reason string, now int64) {
 	expired := record.session
-	expired.State = learningExpired
+	expired.State = contract.LearningExpired
 	expired.Revision = record.session.Revision + 1
 	expired.CollectionExpiresAtEpochMs = nil
 	expired.CandidateExpiresAtEpochMs = nil
 	expired.FailureReason = stringPtr(reason)
 
-	infof(
+	logging.Infof(
 		"[learning] session %s expired: %s (was %s)",
 		record.session.ID, reason, record.session.State,
 	)
@@ -861,7 +924,7 @@ func (s *learningService) expireLocked(record *learningRecord, reason string, no
 	record.terminalAtEpochMs = int64Ptr(now)
 }
 
-func (s *learningService) purgeLocked(now int64) {
+func (s *LearningService) purgeLocked(now int64) {
 	cutoff := now - terminalRetentionMs
 	for id, record := range s.sessions {
 		if record.active || record.terminalAtEpochMs == nil {
@@ -873,7 +936,10 @@ func (s *learningService) purgeLocked(now int64) {
 	}
 }
 
-func findAcceptedCandidate(session learningSession, id *string) *learningCandidate {
+func findAcceptedCandidate(
+	session contract.LearningSession,
+	id *string,
+) *contract.LearningCandidate {
 	if id == nil {
 		return nil
 	}
@@ -887,10 +953,10 @@ func findAcceptedCandidate(session learningSession, id *string) *learningCandida
 }
 
 func findAcceptedCandidateForSlot(
-	session learningSession,
+	session contract.LearningSession,
 	id *string,
 	slot string,
-) *learningCandidate {
+) *contract.LearningCandidate {
 	candidate := findAcceptedCandidate(session, id)
 	if candidate == nil || candidate.Slot != slot {
 		return nil

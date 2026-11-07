@@ -3,7 +3,7 @@
 Android + Web 共用一套 Compose UI，Go 服务端通过 MQTT 驱动
 OpenMQTTGateway 315MHz 网关，实现**控制开关、学习新设备、编辑设备信息、移除旧设备**。
 Android/Web 共享 `contract` 模块中的 HTTP 协议类型；Go 服务端在
-`go-server/contract.go` 中镜像同一协议，避免客户端各自维护同名模型。
+`go-server/internal/contract/contract.go` 中镜像同一协议，避免客户端各自维护同名模型。
 
 当前仓库已实现契约 v2.1.0；协议与状态机的完整定义见
 [`docs/api-contract-v1.md`](docs/api-contract-v1.md)。仓库内的
@@ -143,7 +143,7 @@ MQTT 与 Turso 都是必需配置：未设置 `MQTT_HOST` 或
 `TURSO_DATABASE_URL` 时服务端拒绝启动，不提供无网关或无数据库的降级模式。
 `DATABASE_URL` 可作为 `TURSO_DATABASE_URL` 的别名。
 
-本地可用 `.env` 文件：
+本地可用工作目录中的 `.env` 文件（在 `go-server/` 下运行时即 `go-server/.env`）：
 
 ```bash
 cp go-server/.env.example go-server/.env
@@ -151,9 +151,9 @@ cp go-server/.env.example go-server/.env
 (cd go-server && CGO_ENABLED=1 go run .)
 ```
 
-服务端按以下顺序读取配置：进程环境变量 → `CONFIG_FILE` 指定的文件 →
-当前目录 `.env` → `go-server/.env` → `server/.env`（legacy）。同名环境变量
-优先于文件。`.env` 已被 gitignore，不要提交凭据。
+服务端只读取工作目录中的 `.env`：存在则加载，缺失则跳过；进程环境变量
+优先于文件值。不搜索父目录或 `server/.env`，也不支持 `CONFIG_FILE`。
+`.env` 已被 gitignore，不要提交凭据。
 
 EMQX Cloud 等托管 Broker 通常只开放 TLS 端口。需要 TLS 时使用 MQTT over
 WebSocket Secure（`wss`），由 paho 的 WebSocket 客户端完成 TLS，不需要外部
@@ -220,8 +220,7 @@ docker run --rm --name esp32-server \
 - 构建需要网络：Go 模块在首次构建时下载。
 - 数据库在 Turso Cloud，容器不需要挂载卷。容器以 UID 10001 的非 root 用户
   运行，工作目录 `/app` 只读即可。
-- MQTT 与 Turso 凭据通过环境变量传入，或用 `CONFIG_FILE` 指向挂载的配置
-  文件；不要把 `.env` 打进镜像。
+- MQTT 与 Turso 凭据通过环境变量传入；不要把 `.env` 打进镜像。
 
 #### 在 GitHub Actions 中发布
 
@@ -394,7 +393,6 @@ v1.2.0 不提供事件流。客户端按场景轮询快照：学习 1s、设备�
 | `DATABASE_URL` | 空 | `TURSO_DATABASE_URL` 的别名；两者都设置时以前者为准 |
 | `TURSO_AUTH_TOKEN` | 空 | Turso Cloud token；本地 sqld 可留空 |
 | `LOG_LEVEL` | `debug` | 日志级别：`debug` / `info` / `warn` / `error`；`debug` 打印每条 MQTT 报文与 HTTP 请求 |
-| `CONFIG_FILE` | 空 | 额外的 `KEY=VALUE` 配置文件路径；未设置时尝试 `.env`、`go-server/.env`、`server/.env`（legacy） |
 
 设备、命令、幂等 key 与 tombstone 持久化在 Turso Cloud（GORM）。网关在线
 状态和学习会话是运行时状态：网关状态由 retained LWT 恢复，学习会话在重启
@@ -443,8 +441,11 @@ RX 注入只有 `POST /mock/press-button`。CLI 仅保留 `kill`、`boot`、
 
 本次迁移后实际执行：
 
-- `gofmt -w *.go`、`go vet ./...`、`CGO_ENABLED=1 go test ./...`：
+- `gofmt -w .`、`go vet ./...`、`CGO_ENABLED=1 go test ./...`：
   `go-server` 65 个测试通过（`:memory:`，不访问 Turso）。
+- 随后完成 `internal/` 分层重组与 Koanf 配置加载替换；同一命令复测
+  81 个测试通过，配置优先级与校验行为不变。配置只读取工作目录 `.env`，
+  缺失时跳过，环境变量优先。
 - 本地 sqld（`http://127.0.0.1:18080`）联调：GORM `AutoMigrate` 成功，
   `GET /api/v1/health` 返回 `status=ok`，`GET /api/v1/devices` 返回空列表；
   `TURSO_AUTH_TOKEN` 在日志中显示为 `***`。

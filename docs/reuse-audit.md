@@ -231,3 +231,61 @@ HTTP 契约、MQTT 协议、状态机与表结构不变。
 - 未执行：真实 Turso Cloud 实例、真实网关端到端、Android/Web UI 联调。
   旧 Ktor 服务端的 `server/esp32-control.db` 未自动导入，因为当前环境没有
   Turso Cloud 凭据；需要时用 Turso CLI 或 SQL 手工迁移。
+
+## 8. 2026-11-07 分层重组与 Koanf 配置加载
+
+`go-server` 从扁平 `package main` 拆分为 `internal/` 分层结构：
+`config`、`contract`、`apierror`、`logging`、`idgen`、`repository`、
+`service`、`mqtt`、`server`。同时用 Koanf 替换手写配置解析。配置只读取
+工作目录 `.env`（存在则加载，缺失则跳过），环境变量优先；不提供
+`CONFIG_FILE` 或目录搜索。HTTP 契约、MQTT 协议、状态机与表结构不变。
+
+### 8.1 复用
+
+| 能力 | 复用 | 说明 |
+| --- | --- | --- |
+| 分层骨架 | 原 `package main` 的职责划分 | 只移动与导出，不重写业务逻辑 |
+| 测试数据库 | `repository.Open(":memory:")` | 仍使用同一 GORM sqlite dialector |
+| JSON | `encoding/json` | 不新增序列化层 |
+| 设备/命令/学习状态机 | `internal/service` | 常量、TTL、校验规则逐项保留 |
+| HTTP 中间件 | 现有 Echo CORS / KeyAuth / 自研 request-id、recover | 只改包名与导出名 |
+
+### 8.2 新增依赖
+
+`github.com/knadh/koanf/v2` v2.4.1，配套
+`github.com/knadh/koanf/providers/file` v1.2.1、
+`github.com/knadh/koanf/providers/env` v1.1.0、
+`github.com/knadh/koanf/parsers/dotenv` v1.1.3（2026-11-07）。
+
+验收：
+
+- 维护活跃：Koanf 为广泛使用的 Go 配置库，近期持续发布；子模块均有 tag。
+- 运行时代价：纯 Go、无 CGO、无额外运行时；只在启动阶段构建一次。
+- 类型与语义：`String` / `Int` 读取与现有 `Config` 字段一一对应；无需 fork。
+- 可替换性：仅 `internal/config/loader.go` 依赖 Koanf，其余包只使用 `Config`。
+- 平台匹配：与 Go 1.26 标准库兼容，不影响 Wasm/Android 客户端。
+
+行为差异：dotenv 文件改由 godotenv 解析。旧手写解析器会静默跳过非法行；
+新实现遇到语法错误会启动失败。仓库内没有依赖“忽略非法行”的 `.env`，因此
+不构成兼容性问题。
+
+### 8.3 未采用
+
+| 方案 | 原因 |
+| --- | --- |
+| 继续手写 `KEY=VALUE` 解析 | 已支持注释、`export`、引号与转义，继续自研会重复 dotenv 语义 |
+| `viper` | 功能覆盖更广但依赖树与运行时代价明显更大；本项目只需要 dotenv + env 两层 |
+| `envconfig` 一类仅环境变量的库 | 需要保留工作目录 `.env` 作为低优先级来源 |
+| 引入第二套配置结构 | `Config` 已覆盖全部字段；只替换加载方式 |
+
+### 8.4 验证
+
+- `gofmt -w .`、`go vet ./...`、`CGO_ENABLED=1 go test ./...`：
+  81 个测试通过，覆盖 config、logging、repository、service、mqtt、server。
+- 配置优先级、必填项、TLS 约束、`DATABASE_URL` 别名与 redacting `String()`
+  均由测试覆盖。
+- `:contract:testAndroidHostTest`、`:shared:compileKotlinWasmJs`、
+  `:androidApp:assembleDebug`、`:webApp:wasmJsBrowserDistribution` 通过
+  （Kotlin 模块未改动，任务多为 UP-TO-DATE）。
+- `mock/`：21 个测试通过。
+- 未执行：真实 Turso Cloud、真实网关端到端、容器构建复测。

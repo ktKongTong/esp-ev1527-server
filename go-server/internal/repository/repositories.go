@@ -1,4 +1,4 @@
-package main
+package repository
 
 import (
 	"context"
@@ -6,14 +6,16 @@ import (
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+
+	"esp32controlserver/internal/contract"
 )
 
-type deviceTombstone struct {
+type DeviceTombstone struct {
 	DeviceID         string
 	RemovedAtEpochMs int64
 }
 
-type idempotencyRecord struct {
+type IdempotencyRecord struct {
 	IdempotencyKey      string
 	DeviceID            string
 	Action              string
@@ -21,27 +23,31 @@ type idempotencyRecord struct {
 	DispatchedAtEpochMs *int64
 }
 
-type deviceRepository struct {
+type DeviceRepository struct {
 	db *gorm.DB
 }
 
-func (r *deviceRepository) withDB(db *gorm.DB) *deviceRepository {
-	return &deviceRepository{db: db}
+func NewDeviceRepository(db *gorm.DB) *DeviceRepository {
+	return &DeviceRepository{db: db}
 }
 
-func (r *deviceRepository) list(ctx context.Context) ([]device, error) {
+func (r *DeviceRepository) WithDB(db *gorm.DB) *DeviceRepository {
+	return &DeviceRepository{db: db}
+}
+
+func (r *DeviceRepository) List(ctx context.Context) ([]contract.Device, error) {
 	var rows []deviceRow
 	if err := r.db.WithContext(ctx).Order("createdAtEpochMs ASC").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	devices := make([]device, 0, len(rows))
+	devices := make([]contract.Device, 0, len(rows))
 	for _, row := range rows {
 		devices = append(devices, row.toDevice())
 	}
 	return devices, nil
 }
 
-func (r *deviceRepository) find(ctx context.Context, id string) (*device, error) {
+func (r *DeviceRepository) Find(ctx context.Context, id string) (*contract.Device, error) {
 	var row deviceRow
 	err := r.db.WithContext(ctx).Where("id = ?", id).Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -54,7 +60,10 @@ func (r *deviceRepository) find(ctx context.Context, id string) (*device, error)
 	return &value, nil
 }
 
-func (r *deviceRepository) findTombstone(ctx context.Context, deviceID string) (*deviceTombstone, error) {
+func (r *DeviceRepository) FindTombstone(
+	ctx context.Context,
+	deviceID string,
+) (*DeviceTombstone, error) {
 	var row deviceTombstoneRow
 	err := r.db.WithContext(ctx).Where("deviceId = ?", deviceID).Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -63,13 +72,16 @@ func (r *deviceRepository) findTombstone(ctx context.Context, deviceID string) (
 	if err != nil {
 		return nil, err
 	}
-	return &deviceTombstone{DeviceID: row.DeviceID, RemovedAtEpochMs: row.RemovedAtEpochMs}, nil
+	return &DeviceTombstone{
+		DeviceID:         row.DeviceID,
+		RemovedAtEpochMs: row.RemovedAtEpochMs,
+	}, nil
 }
 
-// findOwner matches on length and code value only. The gateway may report a
+// FindOwner matches on length and code value only. The gateway may report a
 // different protocol number for the same physical code, so protocol must not
 // split code identity.
-func (r *deviceRepository) findOwner(
+func (r *DeviceRepository) FindOwner(
 	ctx context.Context,
 	length int,
 	value int64,
@@ -91,7 +103,7 @@ func (r *deviceRepository) findOwner(
 	return row.ID, nil
 }
 
-func (r *deviceRepository) insert(ctx context.Context, value device) error {
+func (r *DeviceRepository) Insert(ctx context.Context, value contract.Device) error {
 	return r.db.WithContext(ctx).Create(&deviceRow{
 		ID:               value.ID,
 		Name:             value.Name,
@@ -105,7 +117,7 @@ func (r *deviceRepository) insert(ctx context.Context, value device) error {
 	}).Error
 }
 
-func (r *deviceRepository) updateLabels(
+func (r *DeviceRepository) UpdateLabels(
 	ctx context.Context,
 	id, name, location string,
 ) error {
@@ -115,31 +127,45 @@ func (r *deviceRepository) updateLabels(
 		Updates(map[string]any{"name": name, "location": location}).Error
 }
 
-func (r *deviceRepository) delete(ctx context.Context, id string) error {
+func (r *DeviceRepository) Delete(ctx context.Context, id string) error {
 	return r.db.WithContext(ctx).Where("id = ?", id).Delete(&deviceRow{}).Error
 }
 
-func (r *deviceRepository) addTombstone(ctx context.Context, deviceID string, removedAtEpochMs int64) error {
+func (r *DeviceRepository) AddTombstone(
+	ctx context.Context,
+	deviceID string,
+	removedAtEpochMs int64,
+) error {
 	return r.db.WithContext(ctx).
 		Clauses(clause.OnConflict{UpdateAll: true}).
-		Create(&deviceTombstoneRow{DeviceID: deviceID, RemovedAtEpochMs: removedAtEpochMs}).Error
+		Create(&deviceTombstoneRow{
+			DeviceID:         deviceID,
+			RemovedAtEpochMs: removedAtEpochMs,
+		}).Error
 }
 
-func (r *deviceRepository) purgeTombstones(ctx context.Context, cutoffEpochMs int64) error {
+func (r *DeviceRepository) PurgeTombstones(ctx context.Context, cutoffEpochMs int64) error {
 	return r.db.WithContext(ctx).
 		Where("removedAtEpochMs < ?", cutoffEpochMs).
 		Delete(&deviceTombstoneRow{}).Error
 }
 
-type idempotencyRepository struct {
+type IdempotencyRepository struct {
 	db *gorm.DB
 }
 
-func (r *idempotencyRepository) withDB(db *gorm.DB) *idempotencyRepository {
-	return &idempotencyRepository{db: db}
+func NewIdempotencyRepository(db *gorm.DB) *IdempotencyRepository {
+	return &IdempotencyRepository{db: db}
 }
 
-func (r *idempotencyRepository) find(ctx context.Context, key string) (*idempotencyRecord, error) {
+func (r *IdempotencyRepository) WithDB(db *gorm.DB) *IdempotencyRepository {
+	return &IdempotencyRepository{db: db}
+}
+
+func (r *IdempotencyRepository) Find(
+	ctx context.Context,
+	key string,
+) (*IdempotencyRecord, error) {
 	var row idempotencyRow
 	err := r.db.WithContext(ctx).Where("idempotencyKey = ?", key).Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -148,7 +174,7 @@ func (r *idempotencyRepository) find(ctx context.Context, key string) (*idempote
 	if err != nil {
 		return nil, err
 	}
-	return &idempotencyRecord{
+	return &IdempotencyRecord{
 		IdempotencyKey:      row.IdempotencyKey,
 		DeviceID:            row.DeviceID,
 		Action:              row.Action,
@@ -157,7 +183,10 @@ func (r *idempotencyRepository) find(ctx context.Context, key string) (*idempote
 	}, nil
 }
 
-func (r *idempotencyRepository) reserve(ctx context.Context, record idempotencyRecord) error {
+func (r *IdempotencyRepository) Reserve(
+	ctx context.Context,
+	record IdempotencyRecord,
+) error {
 	return r.db.WithContext(ctx).Create(&idempotencyRow{
 		IdempotencyKey:      record.IdempotencyKey,
 		DeviceID:            record.DeviceID,
@@ -167,35 +196,23 @@ func (r *idempotencyRepository) reserve(ctx context.Context, record idempotencyR
 	}).Error
 }
 
-func (r *idempotencyRepository) markDispatched(ctx context.Context, key string, atEpochMs int64) error {
+func (r *IdempotencyRepository) MarkDispatched(
+	ctx context.Context,
+	key string,
+	atEpochMs int64,
+) error {
 	return r.db.WithContext(ctx).
 		Model(&idempotencyRow{}).
 		Where("idempotencyKey = ?", key).
 		Update("dispatchedAtEpochMs", atEpochMs).Error
 }
 
-func (r *idempotencyRepository) release(ctx context.Context, key string) error {
+func (r *IdempotencyRepository) Release(ctx context.Context, key string) error {
 	return r.db.WithContext(ctx).Where("idempotencyKey = ?", key).Delete(&idempotencyRow{}).Error
 }
 
-func (r *idempotencyRepository) purge(ctx context.Context, cutoffEpochMs int64) error {
+func (r *IdempotencyRepository) Purge(ctx context.Context, cutoffEpochMs int64) error {
 	return r.db.WithContext(ctx).
 		Where("createdAtEpochMs < ?", cutoffEpochMs).
 		Delete(&idempotencyRow{}).Error
-}
-
-func (row deviceRow) toDevice() device {
-	return device{
-		ID:       row.ID,
-		Name:     row.Name,
-		Location: row.Location,
-		CodeOn:   row.CodeOn,
-		CodeOff:  row.CodeOff,
-		RF: rfParameters{
-			Protocol: row.RFProtocol,
-			Length:   row.RFLength,
-			Repeat:   row.RFRepeat,
-		},
-		CreatedAtEpochMs: row.CreatedAtEpochMs,
-	}
 }

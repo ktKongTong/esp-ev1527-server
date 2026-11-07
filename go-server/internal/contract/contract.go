@@ -1,90 +1,90 @@
-package main
-
-// Wire contract shared with the Kotlin server, the Compose clients and the
-// documentation in docs/api-contract-v1.md. Field names and enum values must
-// stay byte-for-byte compatible with contract/src/commonMain/.../Models.kt.
+// Package contract mirrors the wire contract shared with the Kotlin server,
+// the Compose clients and docs/api-contract-v1.md. Field names and enum values
+// must stay byte-for-byte compatible with
+// contract/src/commonMain/.../Models.kt.
+package contract
 
 const (
-	contractVersion = "2.2.0"
-	apiVersion      = "1"
-	serverVersion   = "0.2.0"
-	serviceName     = "esp32-control-server"
+	ContractVersion = "2.2.0"
+	APIVersion      = "1"
+	ServerVersion   = "0.2.0"
+	ServiceName     = "esp32-control-server"
 )
 
 const (
-	gatewayOnline  = "online"
-	gatewayOffline = "offline"
-	gatewayUnknown = "unknown"
+	GatewayOnline  = "online"
+	GatewayOffline = "offline"
+	GatewayUnknown = "unknown"
 )
 
 const (
-	receiverUnknown     = "unknown"
-	receiverReceiving   = "receiving"
-	receiverUnavailable = "unavailable"
+	ReceiverUnknown     = "unknown"
+	ReceiverReceiving   = "receiving"
+	ReceiverUnavailable = "unavailable"
 )
 
 const (
-	actionTurnOn  = "turn_on"
-	actionTurnOff = "turn_off"
+	ActionTurnOn  = "turn_on"
+	ActionTurnOff = "turn_off"
 )
 
 const (
-	learningCollectingOn      = "collecting_on"
-	learningCandidateOnReady  = "candidate_on_ready"
-	learningCollectingOff     = "collecting_off"
-	learningCandidateOffReady = "candidate_off_ready"
-	learningReady             = "ready"
-	learningCompleted         = "completed"
-	learningCancelled         = "cancelled"
-	learningExpired           = "expired"
-	learningFailed            = "failed"
-	learningSlotTurnOn        = "turn_on"
-	learningSlotTurnOff       = "turn_off"
+	LearningCollectingOn      = "collecting_on"
+	LearningCandidateOnReady  = "candidate_on_ready"
+	LearningCollectingOff     = "collecting_off"
+	LearningCandidateOffReady = "candidate_off_ready"
+	LearningReady             = "ready"
+	LearningCompleted         = "completed"
+	LearningCancelled         = "cancelled"
+	LearningExpired           = "expired"
+	LearningFailed            = "failed"
+	LearningSlotTurnOn        = "turn_on"
+	LearningSlotTurnOff       = "turn_off"
 )
 
-type rfParameters struct {
+type RFParameters struct {
 	Protocol int `json:"protocol"`
 	Length   int `json:"length"`
 	Repeat   int `json:"repeat"`
 }
 
-type device struct {
+type Device struct {
 	ID               string       `json:"id"`
 	Name             string       `json:"name"`
 	Location         string       `json:"location"`
 	CodeOn           int64        `json:"codeOn"`
 	CodeOff          int64        `json:"codeOff"`
-	RF               rfParameters `json:"rf"`
+	RF               RFParameters `json:"rf"`
 	CreatedAtEpochMs int64        `json:"createdAtEpochMs"`
 }
 
-type deviceListResponse struct {
-	Devices           []device `json:"devices"`
+type DeviceListResponse struct {
+	Devices           []Device `json:"devices"`
 	ServerTimeEpochMs int64    `json:"serverTimeEpochMs"`
 }
 
-// updateDeviceRequest is a partial update. A nil field stays unchanged;
+// UpdateDeviceRequest is a partial update. A nil field stays unchanged;
 // codes and RF parameters are immutable after learning.
-type updateDeviceRequest struct {
+type UpdateDeviceRequest struct {
 	Name     *string `json:"name"`
 	Location *string `json:"location"`
 }
 
-type receiverStatus struct {
+type ReceiverStatus struct {
 	State                string `json:"state"`
 	LastCaptureAtEpochMs *int64 `json:"lastCaptureAtEpochMs"`
 	CaptureCount         int64  `json:"captureCount"`
 }
 
-type gatewayStatus struct {
+type GatewayStatus struct {
 	State                string         `json:"state"`
 	Version              *string        `json:"version"`
 	ClientID             *string        `json:"clientId"`
 	LastChangedAtEpochMs int64          `json:"lastChangedAtEpochMs"`
-	Receiver             receiverStatus `json:"receiver"`
+	Receiver             ReceiverStatus `json:"receiver"`
 }
 
-type healthResponse struct {
+type HealthResponse struct {
 	Status            string        `json:"status"`
 	Service           string        `json:"service"`
 	APIVersion        string        `json:"apiVersion"`
@@ -92,20 +92,29 @@ type healthResponse struct {
 	Runtime           string        `json:"runtime"`
 	UptimeSeconds     int64         `json:"uptimeSeconds"`
 	ServerTimeEpochMs int64         `json:"serverTimeEpochMs"`
-	Gateway           gatewayStatus `json:"gateway"`
+	Gateway           GatewayStatus `json:"gateway"`
 }
 
-type commandRequest struct {
+type CommandRequest struct {
 	Action string `json:"action"`
 }
 
-type commandDispatched struct {
+type CommandDispatched struct {
 	DeviceID            string `json:"deviceId"`
 	Action              string `json:"action"`
 	DispatchedAtEpochMs int64  `json:"dispatchedAtEpochMs"`
 }
 
-type learningCandidate struct {
+// RFPayload is the command frame published to the OpenMQTTGateway command
+// topic. The gateway decodes it into a 315MHz transmission.
+type RFPayload struct {
+	Value    int64 `json:"value"`
+	Protocol int   `json:"protocol"`
+	Length   int   `json:"length"`
+	Repeat   int   `json:"repeat"`
+}
+
+type LearningCandidate struct {
 	ID                 string  `json:"id"`
 	Slot               string  `json:"slot"`
 	Value              int64   `json:"value"`
@@ -121,7 +130,7 @@ type learningCandidate struct {
 	ConflictDeviceID   *string `json:"conflictDeviceId"`
 }
 
-type learningSession struct {
+type LearningSession struct {
 	ID                         string              `json:"id"`
 	State                      string              `json:"state"`
 	Revision                   int64               `json:"revision"`
@@ -130,32 +139,32 @@ type learningSession struct {
 	CollectionExpiresAtEpochMs *int64              `json:"collectionExpiresAtEpochMs"`
 	CandidateExpiresAtEpochMs  *int64              `json:"candidateExpiresAtEpochMs"`
 	RequiredHits               int                 `json:"requiredHits"`
-	Candidates                 []learningCandidate `json:"candidates"`
+	Candidates                 []LearningCandidate `json:"candidates"`
 	AcceptedOnCandidateID      *string             `json:"acceptedOnCandidateId"`
 	AcceptedOffCandidateID     *string             `json:"acceptedOffCandidateId"`
 	FailureReason              *string             `json:"failureReason"`
 }
 
-type startLearningRequest struct {
+type StartLearningRequest struct {
 	NameHint     *string `json:"nameHint"`
 	LocationHint *string `json:"locationHint"`
 }
 
-type confirmLearningRequest struct {
+type ConfirmLearningRequest struct {
 	Name     string `json:"name"`
 	Location string `json:"location"`
 }
 
-type learningConfirmation struct {
-	Device  device          `json:"device"`
-	Session learningSession `json:"session"`
+type LearningConfirmation struct {
+	Device  Device          `json:"device"`
+	Session LearningSession `json:"session"`
 }
 
-type testLearningRequest struct {
+type TestLearningRequest struct {
 	Slot string `json:"slot"`
 }
 
-type learningTestResult struct {
+type LearningTestResult struct {
 	TestID              string `json:"testId"`
 	SessionID           string `json:"sessionId"`
 	Slot                string `json:"slot"`
@@ -164,13 +173,13 @@ type learningTestResult struct {
 	Status              string `json:"status"`
 }
 
-type apiErrorBody struct {
+type APIErrorBody struct {
 	Code      string            `json:"code"`
 	Message   string            `json:"message"`
 	RequestID string            `json:"requestId"`
 	Details   map[string]string `json:"details"`
 }
 
-type apiErrorEnvelope struct {
-	Error apiErrorBody `json:"error"`
+type APIErrorEnvelope struct {
+	Error APIErrorBody `json:"error"`
 }

@@ -238,7 +238,7 @@ Server ──200 Device（更新后的快照）──► Client ──替换本�
 ### 3.1 模块职责
 
 新增 `contract` KMP 模块，供 Android/Web 客户端共用。Go 服务端无法直接消费
-KMP 产物，在 `go-server/contract.go` 中镜像同一组 DTO、枚举与常量；
+KMP 产物，在 `go-server/internal/contract/contract.go` 中镜像同一组 DTO、枚举与常量；
 协议变更必须同时更新两处，并以本文为准。
 
 - 所有 HTTP DTO、枚举
@@ -273,11 +273,11 @@ shared ───────► contract
   ├──► androidApp
   └──► webApp
 
-go-server/contract.go ── mirrors ──► contract (Go structs)
+go-server/internal/contract/contract.go ── mirrors ──► contract (Go structs)
 ```
 
 - `shared`：`api(project(":contract"))`，让两个 GUI 都能使用 DTO
-- Go 服务端无法导入 KMP 模块，`go-server/contract.go` 是跨语言边界的镜像；
+- Go 服务端无法导入 KMP 模块，`go-server/internal/contract/contract.go` 是跨语言边界的镜像；
   JSON 字段、枚举值与错误码必须与 `contract` 一致
 - 禁止在 Kotlin 客户端侧重复定义同名 DTO
 
@@ -286,28 +286,31 @@ go-server/contract.go ── mirrors ──► contract (Go structs)
 服务端按职责分层，不使用单一 `ControlPlane` 对象。`main.go` 只是组合根：
 
 ```
-MQTT (mqtt.go) ──► GatewayIngest (gateway.go) ──► LearningService (捕获聚类/状态机)
-HTTP (http.go) ──► DeviceService / CommandService / LearningService
-Services ────────► Repositories (repositories.go) ──► GORM (store.go) ──► Turso
-CommandService ──► MQTTTransmitter ──► MQTT
+MQTT (internal/mqtt) ──► GatewayIngest (service/gateway.go) ──► LearningService
+HTTP (internal/server) ──► DeviceService / CommandService / LearningService
+Services ──────────────► Repositories (repository) ──► GORM ──► Turso
+CommandService ────────► mqtt.Transmitter ──► MQTT
 ```
 
 | 层 | 位置 | 职责 |
 | --- | --- | --- |
 | 组合根 | `go-server/main.go` | 读取配置、创建数据库/服务/MQTT、启动 HTTP 与定时器 |
-| HTTP | `go-server/http.go` | 参数/请求体解析、状态码映射；不含状态机 |
-| 领域服务 | `go-server/devices.go`、`commands.go`、`learning.go` | 设备、命令发布、学习状态机 |
-| 数据访问 | `go-server/repositories.go` | 仓储与 row ↔ contract 映射 |
-| 持久化 | `go-server/store.go` | GORM row 模型、Turso 连接、`AutoMigrate` |
-| MQTT / 网关 | `go-server/mqtt.go`、`gateway.go` | paho 连接、订阅、发布、重连；RF 抓码摄入与网关运行时状态 |
-| 跨语言 DTO | `go-server/contract.go` | 镜像 `contract` 的 DTO、枚举与版本常量 |
+| 配置 | `go-server/internal/config/` | `Config` 类型与 Koanf 加载（dotenv + 环境变量） |
+| HTTP | `go-server/internal/server/http.go` | 参数/请求体解析、状态码映射；不含状态机 |
+| 领域服务 | `go-server/internal/service/` | 设备、命令发布、学习状态机、网关运行时状态 |
+| 数据访问 | `go-server/internal/repository/repositories.go` | 仓储与 row ↔ contract 映射 |
+| 持久化 | `go-server/internal/repository/store.go` | GORM row 模型、Turso 连接、`AutoMigrate` |
+| MQTT | `go-server/internal/mqtt/mqtt.go` | paho 连接、订阅、发布、重连；命令帧适配 |
+| 跨语言 DTO | `go-server/internal/contract/contract.go` | 镜像 `contract` 的 DTO、枚举与版本常量 |
+| 错误 / 日志 / ID | `go-server/internal/apierror/`、`logging/`、`idgen/` | 统一错误信封、slog、ID 生成 |
 
 约束：
 
 - 状态机逻辑只放在领域服务中，不放 HTTP 路由或客户端。
 - 服务之间的共享状态要么在 Turso，要么在明确的运行时存储
-  （`gatewayStatusStore`），不通过全局可变对象传递。
-- MQTT 回调只做解析和转发；业务判定由 `commandService`/`learningService` 完成。
+  （`service.GatewayStatusStore`），不通过全局可变对象传递。
+- MQTT 回调只做解析和转发；业务判定由 `CommandService`/`LearningService` 完成。
+- 依赖方向单向：`internal/service` 不导入 `internal/server` 或 `internal/mqtt`。
 
 ### 3.5 持久化（Turso Cloud + GORM）
 
@@ -1787,7 +1790,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - 发布：命令主题，QoS 1，不使用 retain。
 - 重连：paho 的 `AutoReconnect` / `ConnectRetry` 负责自动重连；
   `mqtt.go` 只处理连接/断开回调与主题分发。
-- 主题与凭据从环境变量或配置文件读取，不写入日志或 API 响应。
+- 主题与凭据从环境变量或工作目录 `.env` 读取，不写入日志或 API 响应。
 
 规则：
 
@@ -1840,12 +1843,12 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 | 事件 | SSE + 轮询降级 | 仅轮询（SSE 已移除） |
 | 错误 | `{error,message}` | `{error:{code,message,requestId,details}}` |
 | 鉴权 | 无（仅可信局域网） | 单一 Bearer 令牌（`AUTH_TOKEN`）；健康检查公开 |
-| 共享模型 | 服务端/客户端各一份 | Kotlin 客户端共用 `contract`；Go 服务端镜像 `contract.go` |
+| 共享模型 | 服务端/客户端各一份 | Kotlin 客户端共用 `contract`；Go 服务端镜像 `go-server/internal/contract/contract.go` |
 | 服务端结构 | `ControlPlane` 单对象 | `main.go` 组合根 + 领域服务 + 仓储 + GORM |
 
 当前实现（Go 服务端）：
 
-1. `contract` 模块 + 学习状态枚举 + 序列化合同测试；`go-server/contract.go`
+1. `contract` 模块 + 学习状态枚举 + 序列化合同测试；`go-server/internal/contract/contract.go`
    镜像同一协议。
 2. 领域拆分：`deviceService`、`commandService`、`learningService`、
    `gatewayIngest`、`gatewayStatusStore`。

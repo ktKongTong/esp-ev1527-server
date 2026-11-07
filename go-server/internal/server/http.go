@@ -1,4 +1,6 @@
-package main
+// Package server exposes the HTTP API over Echo. Routes stay thin: every
+// handler binds a request, calls one service method, and writes the response.
+package server
 
 import (
 	"crypto/subtle"
@@ -12,19 +14,44 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+
+	"esp32controlserver/internal/apierror"
+	"esp32controlserver/internal/config"
+	"esp32controlserver/internal/contract"
+	"esp32controlserver/internal/idgen"
+	"esp32controlserver/internal/logging"
+	"esp32controlserver/internal/service"
 )
 
 const requestIDKey = "requestId"
 
-type apiServer struct {
-	devices          *deviceService
-	commands         *commandService
-	learning         *learningService
-	gateway          *gatewayStatusStore
+type API struct {
+	devices          *service.DeviceService
+	commands         *service.CommandService
+	learning         *service.LearningService
+	gateway          *service.GatewayStatusStore
 	startedAtEpochMs int64
+	now              func() int64
 }
 
-func newEchoServer(api *apiServer, auth authConfig) *echo.Echo {
+func NewAPI(
+	devices *service.DeviceService,
+	commands *service.CommandService,
+	learning *service.LearningService,
+	gateway *service.GatewayStatusStore,
+) *API {
+	now := func() int64 { return time.Now().UnixMilli() }
+	return &API{
+		devices:          devices,
+		commands:         commands,
+		learning:         learning,
+		gateway:          gateway,
+		startedAtEpochMs: now(),
+		now:              now,
+	}
+}
+
+func NewEcho(api *API, auth config.AuthConfig) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
@@ -59,7 +86,7 @@ func newEchoServer(api *apiServer, auth authConfig) *echo.Echo {
 			http.StatusOK,
 			fmt.Sprintf(
 				"ESP32 control server %s (contract %s)\nAPI base: /api/v1\n",
-				serverVersion, contractVersion,
+				contract.ServerVersion, contract.ContractVersion,
 			),
 		)
 	})
@@ -90,11 +117,16 @@ func newEchoServer(api *apiServer, auth authConfig) *echo.Echo {
 	return e
 }
 
+// ListenAddress returns the host:port the HTTP server binds to.
+func ListenAddress(cfg config.Config) string {
+	return net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+}
+
 // authMiddleware requires the shared bearer token on every route except the
 // public banner and health probe. It runs globally rather than on the /api/v1
 // group because Echo group middleware installs a catch-all route, which turns
 // method-mismatch 405 responses into 404.
-func authMiddleware(auth authConfig) echo.MiddlewareFunc {
+func authMiddleware(auth config.AuthConfig) echo.MiddlewareFunc {
 	return middleware.KeyAuthWithConfig(middleware.KeyAuthConfig{
 		KeyLookup:  "header:" + echo.HeaderAuthorization,
 		AuthScheme: "Bearer",
@@ -102,13 +134,13 @@ func authMiddleware(auth authConfig) echo.MiddlewareFunc {
 			path := c.Request().URL.Path
 			return path == "/" || path == "/api/v1/health"
 		},
-		Validator: func(key string, c echo.Context) (bool, error) {
+		Validator: func(key string, _ echo.Context) (bool, error) {
 			return subtle.ConstantTimeCompare([]byte(key), []byte(auth.Token)) == 1, nil
 		},
 		// Keep the project error envelope; the Echo default would answer with
 		// {"message":"Unauthorized"} and bypass the client's error mapping.
-		ErrorHandler: func(err error, c echo.Context) error {
-			return writeAPIError(c, unauthorized())
+		ErrorHandler: func(_ error, c echo.Context) error {
+			return writeAPIError(c, apierror.Unauthorized())
 		},
 	})
 }
@@ -118,13 +150,13 @@ func requestContextMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 		incoming := c.Request().Header.Get("X-Request-Id")
 		requestID := incoming
 		if len(requestID) < 1 || len(requestID) > 128 {
-			requestID = newID("req")
+			requestID = idgen.New("req")
 		}
 		c.Set(requestIDKey, requestID)
 		c.Response().Header().Set("X-Request-Id", requestID)
 		c.Response().Header().Set("Cache-Control", "no-store")
 
-		debugf(
+		logging.Debugf(
 			"[http] -> %s %s requestId=%s",
 			c.Request().Method, c.Request().URL.RequestURI(), requestID,
 		)
@@ -133,7 +165,7 @@ func requestContextMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 			// The error handler logs the final status.
 			return err
 		}
-		debugf(
+		logging.Debugf(
 			"[http] <- %d %s %s requestId=%s",
 			c.Response().Status,
 			c.Request().Method,
@@ -148,7 +180,7 @@ func recoverMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				errorf(
+				logging.Errorf(
 					"[http] panic %s %s requestId=%s: %v\n%s",
 					c.Request().Method,
 					c.Request().URL.RequestURI(),
@@ -157,7 +189,7 @@ func recoverMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
 					debug.Stack(),
 				)
 				if !c.Response().Committed {
-					_ = writeAPIError(c, newAPIError(
+					_ = writeAPIError(c, apierror.New(
 						http.StatusInternalServerError,
 						"internal_error",
 						"Unexpected server error",
@@ -176,13 +208,13 @@ func currentRequestID(c echo.Context) string {
 	return ""
 }
 
-func (s *apiServer) handleError(err error, c echo.Context) {
+func (s *API) handleError(err error, c echo.Context) {
 	if c.Response().Committed {
 		return
 	}
 	apiErr := toAPIError(err)
 	if apiErr.Status >= http.StatusInternalServerError {
-		errorf(
+		logging.Errorf(
 			"[http] %d %s %s requestId=%s: %v",
 			apiErr.Status,
 			c.Request().Method,
@@ -191,7 +223,7 @@ func (s *apiServer) handleError(err error, c echo.Context) {
 			err,
 		)
 	} else {
-		warnf(
+		logging.Warnf(
 			"[http] %d %s %s requestId=%s: %s",
 			apiErr.Status,
 			apiErr.Code,
@@ -203,8 +235,8 @@ func (s *apiServer) handleError(err error, c echo.Context) {
 	_ = writeAPIError(c, apiErr)
 }
 
-func toAPIError(err error) *apiError {
-	var apiErr *apiError
+func toAPIError(err error) *apierror.Error {
+	var apiErr *apierror.Error
 	if errors.As(err, &apiErr) {
 		return apiErr
 	}
@@ -213,45 +245,57 @@ func toAPIError(err error) *apiError {
 	if errors.As(err, &httpErr) {
 		switch httpErr.Code {
 		case http.StatusNotFound:
-			return newAPIError(http.StatusNotFound, "route_not_found", "Route not found")
+			return apierror.New(http.StatusNotFound, "route_not_found", "Route not found")
 		case http.StatusMethodNotAllowed:
-			return newAPIError(http.StatusMethodNotAllowed, "method_not_allowed", "Method not allowed")
+			return apierror.New(
+				http.StatusMethodNotAllowed,
+				"method_not_allowed",
+				"Method not allowed",
+			)
 		case http.StatusUnsupportedMediaType:
-			return newAPIError(
+			return apierror.New(
 				http.StatusUnsupportedMediaType,
 				"unsupported_media_type",
 				"Content-Type must be application/json",
 			)
 		case http.StatusBadRequest:
-			return newAPIError(http.StatusBadRequest, "malformed_json", "Request body is not valid JSON")
+			return apierror.New(
+				http.StatusBadRequest,
+				"malformed_json",
+				"Request body is not valid JSON",
+			)
 		default:
 			if httpErr.Code >= http.StatusInternalServerError {
-				return newAPIError(
+				return apierror.New(
 					http.StatusInternalServerError,
 					"internal_error",
 					"Unexpected server error",
 				)
 			}
-			return newAPIError(httpErr.Code, "invalid_request", http.StatusText(httpErr.Code))
+			return apierror.New(
+				httpErr.Code,
+				"invalid_request",
+				http.StatusText(httpErr.Code),
+			)
 		}
 	}
 
-	return newAPIError(
+	return apierror.New(
 		http.StatusInternalServerError,
 		"internal_error",
 		"Unexpected server error",
 	)
 }
 
-func writeAPIError(c echo.Context, err *apiError) error {
+func writeAPIError(c echo.Context, err *apierror.Error) error {
 	requestID := currentRequestID(c)
 	if requestID == "" {
-		requestID = newID("req")
+		requestID = idgen.New("req")
 	}
 	c.Response().Header().Set("X-Request-Id", requestID)
 	c.Response().Header().Set("Cache-Control", "no-store")
-	return c.JSON(err.Status, apiErrorEnvelope{
-		Error: apiErrorBody{
+	return c.JSON(err.Status, contract.APIErrorEnvelope{
+		Error: contract.APIErrorBody{
 			Code:      err.Code,
 			Message:   err.Message,
 			RequestID: requestID,
@@ -260,78 +304,78 @@ func writeAPIError(c echo.Context, err *apiError) error {
 	})
 }
 
-func (s *apiServer) health(c echo.Context) error {
-	now := nowEpochMs()
+func (s *API) health(c echo.Context) error {
+	now := s.now()
 	uptime := (now - s.startedAtEpochMs) / 1000
 	if uptime < 0 {
 		uptime = 0
 	}
-	return c.JSON(http.StatusOK, healthResponse{
+	return c.JSON(http.StatusOK, contract.HealthResponse{
 		Status:            "ok",
-		Service:           serviceName,
-		APIVersion:        apiVersion,
-		Version:           serverVersion,
+		Service:           contract.ServiceName,
+		APIVersion:        contract.APIVersion,
+		Version:           contract.ServerVersion,
 		Runtime:           "Go",
 		UptimeSeconds:     uptime,
 		ServerTimeEpochMs: now,
-		Gateway:           s.gateway.snapshot(),
+		Gateway:           s.gateway.Snapshot(),
 	})
 }
 
-func (s *apiServer) listDevices(c echo.Context) error {
-	response, err := s.devices.list(c.Request().Context())
+func (s *API) listDevices(c echo.Context) error {
+	response, err := s.devices.List(c.Request().Context())
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusOK, response)
 }
 
-func (s *apiServer) getDevice(c echo.Context) error {
+func (s *API) getDevice(c echo.Context) error {
 	deviceID := c.Param("deviceId")
 	if deviceID == "" {
-		return invalidDeviceID()
+		return apierror.InvalidDeviceID()
 	}
-	value, err := s.devices.get(c.Request().Context(), deviceID)
+	value, err := s.devices.Get(c.Request().Context(), deviceID)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusOK, value)
 }
 
-func (s *apiServer) updateDevice(c echo.Context) error {
+func (s *API) updateDevice(c echo.Context) error {
 	deviceID := c.Param("deviceId")
 	if deviceID == "" {
-		return invalidDeviceID()
+		return apierror.InvalidDeviceID()
 	}
-	var request updateDeviceRequest
+	var request contract.UpdateDeviceRequest
 	if err := c.Bind(&request); err != nil {
 		return err
 	}
-	updated, err := s.devices.update(c.Request().Context(), deviceID, request)
+	updated, err := s.devices.Update(c.Request().Context(), deviceID, request)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusOK, updated)
 }
 
-func (s *apiServer) issueCommand(c echo.Context) error {
+func (s *API) issueCommand(c echo.Context) error {
 	deviceID := c.Param("deviceId")
 	if deviceID == "" {
-		return invalidDeviceID()
+		return apierror.InvalidDeviceID()
 	}
 	idempotencyKey := c.Request().Header.Get("Idempotency-Key")
 	if idempotencyKey == "" {
-		return newAPIError(
+		return apierror.New(
 			http.StatusBadRequest,
 			"invalid_request",
 			"Idempotency-Key is required",
 		)
 	}
-	var request commandRequest
+	var request contract.CommandRequest
 	if err := c.Bind(&request); err != nil {
 		return err
 	}
-	result, replayed, err := s.commands.issue(
+	result, replayed, err := s.commands.Issue(
 		c.Request().Context(), deviceID, request.Action, idempotencyKey,
 	)
 	if err != nil {
@@ -343,53 +387,57 @@ func (s *apiServer) issueCommand(c echo.Context) error {
 	return c.JSON(http.StatusAccepted, result)
 }
 
-func (s *apiServer) deleteDevice(c echo.Context) error {
+func (s *API) deleteDevice(c echo.Context) error {
 	deviceID := c.Param("deviceId")
 	if deviceID == "" {
-		return invalidDeviceID()
+		return apierror.InvalidDeviceID()
 	}
-	if _, err := s.devices.delete(c.Request().Context(), deviceID); err != nil {
+	if _, err := s.devices.Delete(c.Request().Context(), deviceID); err != nil {
 		return err
 	}
 	return c.NoContent(http.StatusNoContent)
 }
 
-func (s *apiServer) startLearning(c echo.Context) error {
-	var request startLearningRequest
+func (s *API) startLearning(c echo.Context) error {
+	var request contract.StartLearningRequest
 	if c.Request().ContentLength > 0 {
 		if err := c.Bind(&request); err != nil {
 			return err
 		}
 	}
-	session, err := s.learning.start(request)
+	session, err := s.learning.Start(request)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusCreated, session)
 }
 
-func (s *apiServer) getLearning(c echo.Context) error {
+func (s *API) getLearning(c echo.Context) error {
 	sessionID := c.Param("sessionId")
 	if sessionID == "" {
-		return learningNotFound()
+		return apierror.LearningNotFound()
 	}
-	session, err := s.learning.getLearning(sessionID)
+	session, err := s.learning.GetLearning(sessionID)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusOK, session)
 }
 
-func (s *apiServer) acceptCandidate(c echo.Context) error {
+func (s *API) acceptCandidate(c echo.Context) error {
 	sessionID := c.Param("sessionId")
 	if sessionID == "" {
-		return learningNotFound()
+		return apierror.LearningNotFound()
 	}
 	candidateID := c.Param("candidateId")
 	if candidateID == "" {
-		return newAPIError(http.StatusNotFound, "candidate_not_found", "Candidate not found")
+		return apierror.New(
+			http.StatusNotFound,
+			"candidate_not_found",
+			"Candidate not found",
+		)
 	}
-	session, err := s.learning.acceptCandidate(
+	session, err := s.learning.AcceptCandidate(
 		c.Request().Context(), sessionID, candidateID,
 	)
 	if err != nil {
@@ -398,28 +446,28 @@ func (s *apiServer) acceptCandidate(c echo.Context) error {
 	return c.JSON(http.StatusOK, session)
 }
 
-func (s *apiServer) rescanLearning(c echo.Context) error {
+func (s *API) rescanLearning(c echo.Context) error {
 	sessionID := c.Param("sessionId")
 	if sessionID == "" {
-		return learningNotFound()
+		return apierror.LearningNotFound()
 	}
-	session, err := s.learning.rescan(c.Request().Context(), sessionID)
+	session, err := s.learning.Rescan(c.Request().Context(), sessionID)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusOK, session)
 }
 
-func (s *apiServer) testLearning(c echo.Context) error {
+func (s *API) testLearning(c echo.Context) error {
 	sessionID := c.Param("sessionId")
 	if sessionID == "" {
-		return learningNotFound()
+		return apierror.LearningNotFound()
 	}
-	var request testLearningRequest
+	var request contract.TestLearningRequest
 	if err := c.Bind(&request); err != nil {
 		return err
 	}
-	result, err := s.learning.testLearning(
+	result, err := s.learning.TestLearning(
 		c.Request().Context(), sessionID, request.Slot,
 	)
 	if err != nil {
@@ -428,16 +476,16 @@ func (s *apiServer) testLearning(c echo.Context) error {
 	return c.JSON(http.StatusAccepted, result)
 }
 
-func (s *apiServer) confirmLearning(c echo.Context) error {
+func (s *API) confirmLearning(c echo.Context) error {
 	sessionID := c.Param("sessionId")
 	if sessionID == "" {
-		return learningNotFound()
+		return apierror.LearningNotFound()
 	}
-	var request confirmLearningRequest
+	var request contract.ConfirmLearningRequest
 	if err := c.Bind(&request); err != nil {
 		return err
 	}
-	confirmation, err := s.learning.confirmLearning(
+	confirmation, err := s.learning.ConfirmLearning(
 		c.Request().Context(), sessionID, request,
 	)
 	if err != nil {
@@ -447,15 +495,11 @@ func (s *apiServer) confirmLearning(c echo.Context) error {
 	return c.JSON(http.StatusCreated, confirmation)
 }
 
-func (s *apiServer) cancelLearning(c echo.Context) error {
+func (s *API) cancelLearning(c echo.Context) error {
 	sessionID := c.Param("sessionId")
 	if sessionID == "" {
-		return learningNotFound()
+		return apierror.LearningNotFound()
 	}
-	s.learning.cancelLearning(sessionID)
+	s.learning.CancelLearning(sessionID)
 	return c.NoContent(http.StatusNoContent)
-}
-
-func listenAddress(cfg config) string {
-	return net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 }

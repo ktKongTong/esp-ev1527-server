@@ -13,6 +13,7 @@ HTTP 契约与 MQTT 网关协议。Ktor/Kotlin Native 服务端已移除；本�
 | ORM | GORM v1.31.2 + `gorm.io/driver/sqlite` v1.6.0 | 通过 `Config{Conn}` 复用 SQLite SQL 与迁移能力 |
 | 数据库 | Turso Cloud | 纯 Go 驱动 `turso.tech/database/tursogo-serverless`，不落容器磁盘 |
 | MQTT | `eclipse/paho.mqtt.golang` v1.5.1 | MQTT 3.1.1、QoS 1、自动重连 |
+| 配置 | Koanf v2.4.1 | dotenv 文件 + 环境变量分层加载 |
 | 日志 | Go 标准库 `log/slog` | 分级、结构化输出到 stdout |
 
 生产数据库访问使用 Turso serverless 驱动；`gorm.io/driver/sqlite` 只提供
@@ -22,24 +23,47 @@ SQLite 方言与 `AutoMigrate`，不会打开本地文件。测试使用同一 d
 ## 目录
 
 ```text
-contract.go       跨端 DTO、枚举、版本常量
-config.go         环境变量 / CONFIG_FILE / .env 配置加载
-store.go          GORM row 模型、Turso 连接、AutoMigrate
-repositories.go   device / idempotency / tombstone 仓储
-devices.go        设备查询与删除（tombstone）
-commands.go       命令下发与幂等键
-learning.go       学习状态机
-gateway.go        网关在线状态、LWT/version、RF 采集解析
-mqtt.go           paho 连接、订阅、发布
-http.go           Echo 路由、请求 ID、错误信封
-main.go           组装、后台 tick、优雅退出
+main.go                     组装、后台 tick、优雅退出
+internal/
+  config/
+    config.go               Config 及相关配置类型
+    loader.go               LoadConfig：Koanf 加载 dotenv 与环境变量
+  contract/
+    contract.go             跨端 DTO、枚举、版本常量
+  apierror/
+    error.go                API 错误类型与统一构造器
+  logging/
+    log.go                  slog 日志与分级
+  idgen/
+    id.go                   请求 / 设备 / 会话 ID 生成
+  repository/
+    store.go                GORM row 模型、Turso 连接、AutoMigrate
+    repositories.go         device / idempotency / tombstone 仓储
+  service/
+    devices.go              设备查询与删除（tombstone）
+    commands.go             命令下发与幂等键
+    learning.go             学习状态机
+    gateway.go              网关在线状态、LWT/version、RF 采集解析
+    options.go              时钟与 ID 生成器注入
+    validation.go           设备 ID / 标签校验
+    ev1527.go               EV1527 帧校验
+  mqtt/
+    mqtt.go                 paho 连接、订阅、发布与命令发送适配
+  server/
+    http.go                 Echo 路由、请求 ID、错误信封
 ```
+
+依赖方向单向：`config → logging/idgen`，`service → repository/contract`，
+`server → service`，`main` 负责组装；不存在反向依赖。
 
 ## 配置
 
-配置优先级：**环境变量 → `CONFIG_FILE` → `.env` → `go-server/.env` →
-`server/.env`（legacy）**。环境变量优先；空值视为未设置。`server/.env` 仅用于
-兼容旧的本地配置，Ktor 服务端删除后不再需要该目录。
+Koanf 按层加载：先读工作目录中的 `.env`，再读环境变量；环境变量优先，空值视为
+未设置，因此空环境变量不会覆盖文件中的值。`.env` 存在则加载，缺失则跳过；
+不搜索父目录、`go-server/.env` 或 `server/.env`，也不支持 `CONFIG_FILE`。
+
+`.env` 由 godotenv 解析，支持注释、`export KEY=value`、单双引号；语法错误会
+直接导致启动失败，而不是静默跳过该行。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -60,7 +84,6 @@ main.go           组装、后台 tick、优雅退出
 | `MQTT_WS_PATH` | `/mqtt` | WebSocket 路径 |
 | `GATEWAY_CLIENT_ID` | `OpenMQTTGateway_ESP32_315M` | 网关客户端 ID |
 | `LOG_LEVEL` | `debug` | `debug` / `info` / `warn` / `error` |
-| `CONFIG_FILE` | 空 | 显式指定配置文件 |
 
 TLS 约束与网关契约一致：未定义裸 TCP TLS，`MQTT_TLS=true` 必须配合
 `MQTT_TRANSPORT=websocket`。
@@ -92,7 +115,7 @@ go run .
 
 ```bash
 cd go-server
-gofmt -w *.go
+gofmt -w .
 go vet ./...
 CGO_ENABLED=1 go test ./...
 ```
@@ -121,8 +144,8 @@ docker run -d --name esp32-control-go \
 每次构建推送两个 tag：
 
 - `latest`：跟随 `main` 的浮动 tag。
-- `<version>`：固定到 `go-server/contract.go` 中的 `serverVersion`，
-  与 `/api/v1/health` 返回的 `version` 一致，例如 `0.2.0`。
+- `<version>`：固定到 `go-server/internal/contract/contract.go` 中的
+  `ServerVersion`，与 `/api/v1/health` 返回的 `version` 一致，例如 `0.2.0`。
   生产部署建议使用该 tag。
 
 本地构建（在仓库根目录执行）：
@@ -194,7 +217,7 @@ Ktor/Kotlin Native 服务端已于 2026-11-07 移除，以下是仍然适用的�
 - MQTT 库为 paho（MQTT 3.1.1），上一版使用 ktor-mqtt（MQTT 5）。QoS 1、
   clean session、keepalive 和自动重连语义保持等价。
 - 重连由 paho 的 `AutoReconnect` / `ConnectRetry` 负责，不再手写重连循环。
-- 配置文件搜索额外包含 `go-server/.env`，便于在模块目录内直接启动。
+- `.env` 只从进程工作目录读取；在 `go-server/` 下启动即读取 `go-server/.env`。
 - 学习窗口以契约实现为准：600ms 按键间隔、3 次命中、60s 采集、
   30s 候选、5min ready、10min 会话。
 
@@ -206,6 +229,12 @@ Reused: gorm.io/gorm v1.31.2 + gorm.io/driver/sqlite v1.6.0
 Reused: github.com/labstack/echo/v4 v4.16.3 (existing HTTP layer),
         including middleware.KeyAuth for bearer-token auth
 Reused: github.com/eclipse/paho.mqtt.golang v1.5.1 (existing MQTT client)
+New dependency: github.com/knadh/koanf/v2 v2.4.1 with
+        providers/file v1.2.1, providers/env v1.1.0, parsers/dotenv v1.1.3
+Not reused because: the previous loader was a hand-written KEY=VALUE parser
+        that duplicated dotenv quoting, comments, and precedence rules.
+New implementation scope: config struct and Koanf load order only; defaults,
+        required fields, and validation stay unchanged.
 New dependency: turso.tech/database/tursogo-serverless
         v0.0.0-20261107095519-8e7eac038f1f
 Not reused because: go-libsql is CGO-based and links a second C SQLite, which

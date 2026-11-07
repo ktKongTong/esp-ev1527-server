@@ -1,4 +1,6 @@
-package main
+// Package logging owns the process-wide slog logger and its printf-style
+// helpers.
+package logging
 
 import (
 	"context"
@@ -9,27 +11,18 @@ import (
 	"time"
 )
 
-type logLevel = slog.Level
-
-const (
-	levelDebug = slog.LevelDebug
-	levelInfo  = slog.LevelInfo
-	levelWarn  = slog.LevelWarn
-	levelError = slog.LevelError
-)
-
-var logLevelVar = newConfiguredLevelVar()
+var levelVar = newConfiguredLevelVar()
 
 func newConfiguredLevelVar() *slog.LevelVar {
 	level := new(slog.LevelVar)
-	level.Set(levelDebug)
+	level.Set(slog.LevelDebug)
 	return level
 }
 
 // appLog writes leveled logs to stdout, which is the container log sink. A
 // TextHandler is enough here; no third-party logging dependency is needed.
 var appLog = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-	Level: logLevelVar,
+	Level: levelVar,
 	// Keep timestamps in UTC so container logs do not depend on the host zone.
 	ReplaceAttr: func(groups []string, attr slog.Attr) slog.Attr {
 		if len(groups) == 0 && attr.Key == slog.TimeKey {
@@ -41,11 +34,11 @@ var appLog = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 	},
 }))
 
-func setLogLevel(level slog.Level) {
-	logLevelVar.Set(level)
+func SetLevel(level slog.Level) {
+	levelVar.Set(level)
 }
 
-func parseLogLevel(raw string) (slog.Level, error) {
+func ParseLevel(raw string) (slog.Level, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "", "debug":
 		return slog.LevelDebug, nil
@@ -62,10 +55,10 @@ func parseLogLevel(raw string) (slog.Level, error) {
 
 // The printf-style helpers keep existing call sites readable. slog still owns
 // level filtering, timestamp formatting and concurrent writes.
-func debugf(format string, args ...any) { logf(slog.LevelDebug, format, args...) }
-func infof(format string, args ...any)  { logf(slog.LevelInfo, format, args...) }
-func warnf(format string, args ...any)  { logf(slog.LevelWarn, format, args...) }
-func errorf(format string, args ...any) { logf(slog.LevelError, format, args...) }
+func Debugf(format string, args ...any) { logf(slog.LevelDebug, format, args...) }
+func Infof(format string, args ...any)  { logf(slog.LevelInfo, format, args...) }
+func Warnf(format string, args ...any)  { logf(slog.LevelWarn, format, args...) }
+func Errorf(format string, args ...any) { logf(slog.LevelError, format, args...) }
 
 func logf(level slog.Level, format string, args ...any) {
 	ctx := context.Background()
@@ -75,7 +68,7 @@ func logf(level slog.Level, format string, args ...any) {
 	appLog.Log(ctx, level, fmt.Sprintf(format, args...))
 }
 
-func logPreview(payload []byte, limit int) string {
+func Preview(payload []byte, limit int) string {
 	text := strings.TrimSpace(string(payload))
 	if len(text) <= limit {
 		return text
