@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 
@@ -42,6 +43,28 @@ func (f *fakeTransmitter) calls() []contract.RFPayload {
 	return append([]contract.RFPayload(nil), f.payloads...)
 }
 
+type fakeRegistrar struct {
+	mu      sync.Mutex
+	nextRun map[string]time.Time
+}
+
+func newFakeRegistrar() *fakeRegistrar {
+	return &fakeRegistrar{nextRun: make(map[string]time.Time)}
+}
+
+func (f *fakeRegistrar) Register(scheduleID string, at time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextRun[scheduleID] = at
+	return nil
+}
+
+func (f *fakeRegistrar) Unregister(scheduleID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.nextRun, scheduleID)
+}
+
 func sampleDevice() contract.Device {
 	const codeOn int64 = 1714739
 	codeOff := (codeOn &^ 0xF) | ((codeOn & 0xF) ^ 1)
@@ -71,6 +94,8 @@ func newTestAPI(
 	})
 
 	devices := repository.NewDeviceRepository(db)
+	groups := repository.NewGroupRepository(db)
+	schedules := repository.NewScheduleRepository(db)
 	idempotency := repository.NewIdempotencyRepository(db)
 	now := int64(1_000_000)
 	clock := service.WithNow(func() int64 { return now })
@@ -78,21 +103,31 @@ func newTestAPI(
 	gateway := service.NewGatewayStatusStore("test-gateway", clock)
 	gateway.SetGateway(contract.GatewayOnline, nil)
 	transmitter := &fakeTransmitter{}
+	counter := 0
+	ids := service.WithIDGenerator(func(prefix string) string {
+		counter++
+		return prefix + "_http_test_" + strconv.Itoa(counter)
+	})
 
 	deviceService := service.NewDeviceService(db, devices, clock)
 	commandService := service.NewCommandService(
 		db, devices, idempotency, gateway, transmitter, clock,
 	)
-	counter := 0
+	groupService := service.NewGroupService(
+		db, groups, devices, commandService, gateway, clock, ids,
+	)
+	scheduleService := service.NewScheduleService(
+		db, schedules, devices, groups, commandService, gateway,
+		newFakeRegistrar(), 2*time.Minute, clock, ids,
+	)
 	learning := service.NewLearningService(
-		db, devices, gateway, transmitter, clock,
-		service.WithIDGenerator(func(prefix string) string {
-			counter++
-			return prefix + "_http_test_" + strconv.Itoa(counter)
-		}),
+		db, devices, gateway, transmitter, clock, ids,
 	)
 
-	api := NewAPI(deviceService, commandService, learning, gateway)
+	api := NewAPI(
+		deviceService, commandService, learning, groupService,
+		scheduleService, gateway,
+	)
 	api.now = func() int64 { return now }
 	api.startedAtEpochMs = now - 65_000
 	return NewEcho(api, config.AuthConfig{Token: testAuthToken}), devices, transmitter, &now

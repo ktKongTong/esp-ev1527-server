@@ -50,8 +50,41 @@ func DeviceNotFound() *Error {
 	return New(http.StatusNotFound, "device_not_found", "Device not found")
 }
 
+func DeviceReferenceNotFound(deviceID string) *Error {
+	return NewDetails(
+		http.StatusNotFound,
+		"device_not_found",
+		"Device not found",
+		map[string]string{"deviceId": deviceID},
+	)
+}
+
 func LearningNotFound() *Error {
 	return New(http.StatusNotFound, "learning_session_not_found", "Learning session not found")
+}
+
+func InvalidGroupID() *Error {
+	return New(http.StatusBadRequest, "invalid_group_id", "Invalid group id")
+}
+
+func GroupNotFound() *Error {
+	return New(http.StatusNotFound, "group_not_found", "Group not found")
+}
+
+func GroupEmpty() *Error {
+	return New(http.StatusConflict, "group_empty", "Group has no devices")
+}
+
+func InvalidScheduleID() *Error {
+	return New(http.StatusBadRequest, "invalid_schedule_id", "Invalid schedule id")
+}
+
+func ScheduleNotFound() *Error {
+	return New(http.StatusNotFound, "schedule_not_found", "Schedule not found")
+}
+
+func InvalidSchedule(message string) *Error {
+	return New(http.StatusBadRequest, "invalid_schedule", message)
 }
 
 func InvalidRequest(message string) *Error {

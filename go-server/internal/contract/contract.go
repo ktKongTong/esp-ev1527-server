@@ -5,9 +5,9 @@
 package contract
 
 const (
-	ContractVersion = "2.2.0"
+	ContractVersion = "2.3.0"
 	APIVersion      = "1"
-	ServerVersion   = "0.2.0"
+	ServerVersion   = "0.3.0"
 	ServiceName     = "esp32-control-server"
 )
 
@@ -26,6 +26,18 @@ const (
 const (
 	ActionTurnOn  = "turn_on"
 	ActionTurnOff = "turn_off"
+)
+
+const (
+	ScheduleTargetDevice = "device"
+	ScheduleTargetGroup  = "group"
+)
+
+const (
+	ScheduleResultDispatched = "dispatched"
+	ScheduleResultPartial    = "partial"
+	ScheduleResultSkipped    = "skipped"
+	ScheduleResultFailed     = "failed"
 )
 
 const (
@@ -103,6 +115,91 @@ type CommandDispatched struct {
 	DeviceID            string `json:"deviceId"`
 	Action              string `json:"action"`
 	DispatchedAtEpochMs int64  `json:"dispatchedAtEpochMs"`
+}
+
+type CommandFailure struct {
+	DeviceID string `json:"deviceId"`
+	Code     string `json:"code"`
+}
+
+type GroupCommandDispatched struct {
+	GroupID             string           `json:"groupId"`
+	Action              string           `json:"action"`
+	DispatchedCount     int              `json:"dispatchedCount"`
+	FailedCount         int              `json:"failedCount"`
+	Failures            []CommandFailure `json:"failures"`
+	DispatchedAtEpochMs int64            `json:"dispatchedAtEpochMs"`
+}
+
+type Group struct {
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	DeviceIDs        []string `json:"deviceIds"`
+	CreatedAtEpochMs int64    `json:"createdAtEpochMs"`
+	UpdatedAtEpochMs int64    `json:"updatedAtEpochMs"`
+}
+
+type GroupListResponse struct {
+	Groups            []Group `json:"groups"`
+	ServerTimeEpochMs int64   `json:"serverTimeEpochMs"`
+}
+
+type CreateGroupRequest struct {
+	Name      string   `json:"name"`
+	DeviceIDs []string `json:"deviceIds"`
+}
+
+// UpdateGroupRequest is a partial update. A nil field stays unchanged. When
+// deviceIds is present it replaces the full membership set.
+type UpdateGroupRequest struct {
+	Name      *string   `json:"name"`
+	DeviceIDs *[]string `json:"deviceIds"`
+}
+
+type Schedule struct {
+	ID               string  `json:"id"`
+	Name             string  `json:"name"`
+	TargetType       string  `json:"targetType"`
+	TargetID         string  `json:"targetId"`
+	Action           string  `json:"action"`
+	RRule            string  `json:"rrule"`
+	TimeZone         string  `json:"timeZone"`
+	StartsAtEpochMs  int64   `json:"startsAtEpochMs"`
+	Enabled          bool    `json:"enabled"`
+	NextRunAtEpochMs *int64  `json:"nextRunAtEpochMs"`
+	LastRunAtEpochMs *int64  `json:"lastRunAtEpochMs"`
+	LastResult       *string `json:"lastResult"`
+	LastError        *string `json:"lastError"`
+	CreatedAtEpochMs int64   `json:"createdAtEpochMs"`
+	UpdatedAtEpochMs int64   `json:"updatedAtEpochMs"`
+}
+
+type ScheduleListResponse struct {
+	Schedules         []Schedule `json:"schedules"`
+	ServerTimeEpochMs int64      `json:"serverTimeEpochMs"`
+}
+
+type CreateScheduleRequest struct {
+	Name            string `json:"name"`
+	TargetType      string `json:"targetType"`
+	TargetID        string `json:"targetId"`
+	Action          string `json:"action"`
+	RRule           string `json:"rrule"`
+	TimeZone        string `json:"timeZone"`
+	StartsAtEpochMs int64  `json:"startsAtEpochMs"`
+	Enabled         *bool  `json:"enabled"`
+}
+
+// UpdateScheduleRequest is a partial update. A nil field stays unchanged.
+type UpdateScheduleRequest struct {
+	Name            *string `json:"name"`
+	TargetType      *string `json:"targetType"`
+	TargetID        *string `json:"targetId"`
+	Action          *string `json:"action"`
+	RRule           *string `json:"rrule"`
+	TimeZone        *string `json:"timeZone"`
+	StartsAtEpochMs *int64  `json:"startsAtEpochMs"`
+	Enabled         *bool   `json:"enabled"`
 }
 
 // RFPayload is the command frame published to the OpenMQTTGateway command

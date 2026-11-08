@@ -32,6 +32,8 @@ import com.esp32.control.gui.resources.ic_check_circle
 import com.esp32.control.gui.resources.ic_close
 import com.esp32.control.gui.resources.ic_delete
 import com.esp32.control.gui.resources.ic_error
+import com.esp32.control.gui.resources.ic_groups
+import com.esp32.control.gui.resources.ic_schedule
 import com.esp32.control.gui.resources.ic_settings
 import com.esp32.control.gui.resources.ic_settings_remote
 import org.jetbrains.compose.resources.DrawableResource
@@ -89,6 +91,14 @@ internal fun DeleteIcon(modifier: Modifier = Modifier) =
 @Composable
 internal fun SettingsIcon(modifier: Modifier = Modifier) =
     AppIcon(Res.drawable.ic_settings, modifier)
+
+@Composable
+internal fun GroupsIcon(modifier: Modifier = Modifier) =
+    AppIcon(Res.drawable.ic_groups, modifier)
+
+@Composable
+internal fun ScheduleIcon(modifier: Modifier = Modifier) =
+    AppIcon(Res.drawable.ic_schedule, modifier)
 
 @Composable
 internal fun SheetDragHandle() {
@@ -174,6 +184,35 @@ internal fun ProgressBar(fraction: Float, modifier: Modifier = Modifier) {
                 .clip(CircleShape)
                 .background(MaterialTheme.colorScheme.primary),
         )
+    }
+}
+
+@Composable
+internal fun NoticeBanner(message: String, onDismiss: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 16.dp, top = 10.dp, bottom = 10.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                onClick = onDismiss,
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                ),
+            ) {
+                Text("关闭")
+            }
+        }
     }
 }
 

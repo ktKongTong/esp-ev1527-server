@@ -67,7 +67,7 @@ func (s *DeviceService) Update(
 	}
 	var name, location string
 	if request.Name != nil {
-		value, ok := normalizeDeviceLabel(*request.Name)
+		value, ok := normalizeLabel(*request.Name)
 		if !ok {
 			return contract.Device{}, apierror.InvalidRequest(
 				"name and location must be 1-64 characters",
@@ -76,7 +76,7 @@ func (s *DeviceService) Update(
 		name = value
 	}
 	if request.Location != nil {
-		value, ok := normalizeDeviceLabel(*request.Location)
+		value, ok := normalizeLabel(*request.Location)
 		if !ok {
 			return contract.Device{}, apierror.InvalidRequest(
 				"name and location must be 1-64 characters",
@@ -130,6 +130,10 @@ func (s *DeviceService) Delete(ctx context.Context, deviceID string) (bool, erro
 				return nil
 			}
 			return apierror.DeviceNotFound()
+		}
+		// Memberships and device-targeted schedules cannot outlive the device.
+		if err := repository.DeleteDeviceReferences(ctx, tx, deviceID); err != nil {
+			return err
 		}
 		if err := devices.Delete(ctx, deviceID); err != nil {
 			return err

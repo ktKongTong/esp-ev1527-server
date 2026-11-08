@@ -3,13 +3,18 @@ package com.esp32.control.gui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.esp32.control.contract.CommandAction
+import com.esp32.control.contract.CreateScheduleRequest
 import com.esp32.control.contract.Device
 import com.esp32.control.contract.GatewayState
+import com.esp32.control.contract.Group
 import com.esp32.control.contract.HealthResponse
 import com.esp32.control.contract.LearningCandidate
 import com.esp32.control.contract.LearningSession
 import com.esp32.control.contract.LearningSlot
 import com.esp32.control.contract.LearningState
+import com.esp32.control.contract.Schedule
+import com.esp32.control.contract.ScheduleTarget
+import com.esp32.control.contract.UpdateScheduleRequest
 import com.esp32.control.gui.api.ClientApiException
 import com.esp32.control.gui.api.Esp32Api
 import com.esp32.control.gui.api.newIdempotencyKey
@@ -44,6 +49,8 @@ internal data class AppUiState(
     val selectedTab: BottomTab = BottomTab.Devices,
     val health: HealthResponse? = null,
     val devices: List<Device> = emptyList(),
+    val groups: List<Group> = emptyList(),
+    val schedules: List<Schedule> = emptyList(),
     val loading: Boolean = true,
     val pendingDeviceId: String? = null,
     val error: String? = null,
@@ -52,6 +59,19 @@ internal data class AppUiState(
     val editBusy: Boolean = false,
     val editError: String? = null,
     val removalTargetId: String? = null,
+    val pendingGroupId: String? = null,
+    val groupNotice: String? = null,
+    val groupEditorVisible: Boolean = false,
+    val groupEditorTarget: Group? = null,
+    val groupBusy: Boolean = false,
+    val groupError: String? = null,
+    val groupRemovalTargetId: String? = null,
+    val pendingScheduleId: String? = null,
+    val scheduleEditorVisible: Boolean = false,
+    val scheduleEditorTarget: Schedule? = null,
+    val scheduleBusy: Boolean = false,
+    val scheduleError: String? = null,
+    val scheduleRemovalTargetId: String? = null,
     val learningVisible: Boolean = false,
     val learning: LearningSession? = null,
     val learningId: String? = null,
@@ -71,6 +91,12 @@ internal data class AppUiState(
 
     val removalTarget: Device?
         get() = removalTargetId?.let { id -> devices.firstOrNull { it.id == id } }
+
+    val groupRemovalTarget: Group?
+        get() = groupRemovalTargetId?.let { id -> groups.firstOrNull { it.id == id } }
+
+    val scheduleRemovalTarget: Schedule?
+        get() = scheduleRemovalTargetId?.let { id -> schedules.firstOrNull { it.id == id } }
 }
 
 internal class AppViewModel(
@@ -219,6 +245,286 @@ internal class AppViewModel(
                 }
             }
         }
+    }
+
+    fun openGroupEditor(groupId: String? = null) {
+        val target = groupId?.let { id -> _state.value.groups.firstOrNull { it.id == id } }
+        if (groupId != null && target == null) return
+        _state.update {
+            it.copy(
+                groupEditorVisible = true,
+                groupEditorTarget = target,
+                groupError = null,
+            )
+        }
+    }
+
+    fun closeGroupEditor() {
+        if (_state.value.groupBusy) return
+        _state.update {
+            it.copy(groupEditorVisible = false, groupEditorTarget = null, groupError = null)
+        }
+    }
+
+    fun saveGroup(groupId: String?, name: String, deviceIds: List<String>) {
+        if (_state.value.groupBusy) return
+        val client = api ?: return
+        _state.update { it.copy(groupBusy = true, groupError = null) }
+        connectionScope.launch {
+            try {
+                val saved = if (groupId == null) {
+                    client.createGroup(name, deviceIds)
+                } else {
+                    client.updateGroup(groupId, name, deviceIds)
+                }
+                _state.update { current ->
+                    val exists = current.groups.any { it.id == saved.id }
+                    current.copy(
+                        groups = if (exists) {
+                            current.groups.map { if (it.id == saved.id) saved else it }
+                        } else {
+                            current.groups + saved
+                        },
+                        groupEditorVisible = false,
+                        groupEditorTarget = null,
+                        groupBusy = false,
+                        groupError = null,
+                        error = null,
+                    )
+                }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
+                    refreshGroups()
+                }
+                _state.update { it.copy(groupBusy = false, groupError = t.readableMessage()) }
+            }
+        }
+    }
+
+    fun requestGroupRemoval(groupId: String) {
+        _state.update { it.copy(groupRemovalTargetId = groupId) }
+    }
+
+    fun dismissGroupRemoval() {
+        _state.update { it.copy(groupRemovalTargetId = null) }
+    }
+
+    fun removeGroup(groupId: String) {
+        val client = api ?: return
+        _state.update { it.copy(groupRemovalTargetId = null) }
+        connectionScope.launch {
+            try {
+                client.removeGroup(groupId)
+                dropGroup(groupId)
+                _state.update { it.copy(error = null) }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
+                    dropGroup(groupId)
+                } else {
+                    _state.update { it.copy(error = t.readableMessage()) }
+                }
+            }
+        }
+    }
+
+    fun sendGroupCommand(groupId: String, action: CommandAction) {
+        if (_state.value.pendingGroupId != null) return
+        val client = api ?: return
+        _state.update { it.copy(pendingGroupId = groupId, groupNotice = null) }
+        connectionScope.launch {
+            try {
+                val result = client.sendGroupCommand(
+                    groupId = groupId,
+                    action = action,
+                    idempotencyKey = newIdempotencyKey(),
+                )
+                val notice = buildString {
+                    append("已下发 ")
+                    append(result.dispatchedCount)
+                    append(" 台")
+                    if (result.failedCount > 0) {
+                        append("，")
+                        append(result.failedCount)
+                        append(" 台失败（")
+                        append(result.failures.joinToString { it.code })
+                        append("）")
+                    }
+                }
+                _state.update { it.copy(groupNotice = notice, error = null) }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                _state.update { it.copy(error = t.readableMessage()) }
+                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
+                    refreshGroups()
+                }
+            } finally {
+                if (api === client) {
+                    _state.update { it.copy(pendingGroupId = null) }
+                }
+            }
+        }
+    }
+
+    fun openScheduleEditor(scheduleId: String? = null) {
+        val target = scheduleId?.let { id -> _state.value.schedules.firstOrNull { it.id == id } }
+        if (scheduleId != null && target == null) return
+        _state.update {
+            it.copy(
+                scheduleEditorVisible = true,
+                scheduleEditorTarget = target,
+                scheduleError = null,
+            )
+        }
+    }
+
+    fun closeScheduleEditor() {
+        if (_state.value.scheduleBusy) return
+        _state.update {
+            it.copy(
+                scheduleEditorVisible = false,
+                scheduleEditorTarget = null,
+                scheduleError = null,
+            )
+        }
+    }
+
+    fun saveSchedule(
+        scheduleId: String?,
+        name: String,
+        targetType: ScheduleTarget,
+        targetId: String,
+        action: CommandAction,
+        rrule: String,
+        timeZone: String,
+        startsAtEpochMs: Long,
+        enabled: Boolean,
+    ) {
+        if (_state.value.scheduleBusy) return
+        val client = api ?: return
+        val existing = scheduleId?.let { id -> _state.value.schedules.firstOrNull { it.id == id } }
+        val update = existing?.let {
+            UpdateScheduleRequest(
+                name = name.takeIf { value -> value != it.name },
+                targetType = targetType.takeIf { value -> value != it.targetType },
+                targetId = targetId.takeIf { value -> value != it.targetId },
+                action = action.takeIf { value -> value != it.action },
+                rrule = rrule.takeIf { value -> value != it.rrule },
+                timeZone = timeZone.takeIf { value -> value != it.timeZone },
+                startsAtEpochMs = startsAtEpochMs.takeIf { value -> value != it.startsAtEpochMs },
+                enabled = enabled.takeIf { value -> value != it.enabled },
+            )
+        }
+        if (update != null && update.isEmpty()) {
+            closeScheduleEditor()
+            return
+        }
+        _state.update { it.copy(scheduleBusy = true, scheduleError = null) }
+        connectionScope.launch {
+            try {
+                val saved = if (scheduleId == null) {
+                    client.createSchedule(
+                        CreateScheduleRequest(
+                            name = name,
+                            targetType = targetType,
+                            targetId = targetId,
+                            action = action,
+                            rrule = rrule,
+                            timeZone = timeZone,
+                            startsAtEpochMs = startsAtEpochMs,
+                            enabled = enabled,
+                        ),
+                    )
+                } else {
+                    client.updateSchedule(scheduleId, update ?: UpdateScheduleRequest())
+                }
+                _state.update { current ->
+                    val exists = current.schedules.any { it.id == saved.id }
+                    current.copy(
+                        schedules = if (exists) {
+                            current.schedules.map { if (it.id == saved.id) saved else it }
+                        } else {
+                            current.schedules + saved
+                        },
+                        scheduleEditorVisible = false,
+                        scheduleEditorTarget = null,
+                        scheduleBusy = false,
+                        scheduleError = null,
+                        error = null,
+                    )
+                }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
+                    refreshSchedules()
+                }
+                _state.update { it.copy(scheduleBusy = false, scheduleError = t.readableMessage()) }
+            }
+        }
+    }
+
+    fun setScheduleEnabled(scheduleId: String, enabled: Boolean) {
+        if (_state.value.pendingScheduleId != null) return
+        val client = api ?: return
+        _state.update { it.copy(pendingScheduleId = scheduleId) }
+        connectionScope.launch {
+            try {
+                val saved = client.updateSchedule(
+                    scheduleId,
+                    UpdateScheduleRequest(enabled = enabled),
+                )
+                _state.update { current ->
+                    current.copy(
+                        schedules = current.schedules.map {
+                            if (it.id == saved.id) saved else it
+                        },
+                        error = null,
+                    )
+                }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                _state.update { it.copy(error = t.readableMessage()) }
+                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
+                    refreshSchedules()
+                }
+            } finally {
+                if (api === client) {
+                    _state.update { it.copy(pendingScheduleId = null) }
+                }
+            }
+        }
+    }
+
+    fun requestScheduleRemoval(scheduleId: String) {
+        _state.update { it.copy(scheduleRemovalTargetId = scheduleId) }
+    }
+
+    fun dismissScheduleRemoval() {
+        _state.update { it.copy(scheduleRemovalTargetId = null) }
+    }
+
+    fun removeSchedule(scheduleId: String) {
+        val client = api ?: return
+        _state.update { it.copy(scheduleRemovalTargetId = null) }
+        connectionScope.launch {
+            try {
+                client.removeSchedule(scheduleId)
+                dropSchedule(scheduleId)
+                _state.update { it.copy(error = null) }
+            } catch (t: Throwable) {
+                if (t is CancellationException) throw t
+                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
+                    dropSchedule(scheduleId)
+                } else {
+                    _state.update { it.copy(error = t.readableMessage()) }
+                }
+            }
+        }
+    }
+
+    fun dismissGroupNotice() {
+        _state.update { it.copy(groupNotice = null) }
     }
 
     fun openLearning() {
@@ -427,6 +733,8 @@ internal class AppViewModel(
                 apiToken = token,
                 health = null,
                 devices = emptyList(),
+                groups = emptyList(),
+                schedules = emptyList(),
                 loading = true,
                 pendingDeviceId = null,
                 error = null,
@@ -435,6 +743,19 @@ internal class AppViewModel(
                 editBusy = false,
                 editError = null,
                 removalTargetId = null,
+                pendingGroupId = null,
+                groupNotice = null,
+                groupEditorVisible = false,
+                groupEditorTarget = null,
+                groupBusy = false,
+                groupError = null,
+                groupRemovalTargetId = null,
+                pendingScheduleId = null,
+                scheduleEditorVisible = false,
+                scheduleEditorTarget = null,
+                scheduleBusy = false,
+                scheduleError = null,
+                scheduleRemovalTargetId = null,
                 learningVisible = false,
                 learning = null,
                 learningId = null,
@@ -445,7 +766,7 @@ internal class AppViewModel(
             )
         }
         loadAll(client)
-        startHealthPolling(client)
+        startPolling(client)
     }
 
     private fun loadAll(client: Esp32Api) {
@@ -454,7 +775,17 @@ internal class AppViewModel(
                 val health = client.health()
                 _state.update { it.copy(health = health) }
                 val devices = client.devices()
-                _state.update { it.copy(devices = devices, error = null, loading = false) }
+                val groups = client.groups().groups
+                val schedules = client.schedules().schedules
+                _state.update {
+                    it.copy(
+                        devices = devices,
+                        groups = groups,
+                        schedules = schedules,
+                        error = null,
+                        loading = false,
+                    )
+                }
                 maybeStartLearning()
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
@@ -478,11 +809,41 @@ internal class AppViewModel(
         }
     }
 
-    private fun startHealthPolling(client: Esp32Api) {
+    private fun startPolling(client: Esp32Api) {
         connectionScope.launch {
             while (isActive) {
                 delay(30_000)
+                // The contract has no event stream: every view refreshes from
+                // the same periodic snapshot. A failed poll is transient and
+                // keeps the previous values.
                 runCatching { client.health() }.onSuccess(::applyHealth)
+                runCatching { client.devices() }.onSuccess { devices ->
+                    _state.update { it.copy(devices = devices) }
+                }
+                runCatching { client.groups() }.onSuccess { response ->
+                    _state.update { it.copy(groups = response.groups) }
+                }
+                runCatching { client.schedules() }.onSuccess { response ->
+                    _state.update { it.copy(schedules = response.schedules) }
+                }
+            }
+        }
+    }
+
+    private fun refreshGroups() {
+        val client = api ?: return
+        connectionScope.launch {
+            runCatching { client.groups() }.onSuccess { response ->
+                _state.update { it.copy(groups = response.groups) }
+            }
+        }
+    }
+
+    private fun refreshSchedules() {
+        val client = api ?: return
+        connectionScope.launch {
+            runCatching { client.schedules() }.onSuccess { response ->
+                _state.update { it.copy(schedules = response.schedules) }
             }
         }
     }
@@ -550,13 +911,51 @@ internal class AppViewModel(
         _state.update { current ->
             current.copy(
                 devices = current.devices.filterNot { it.id == deviceId },
+                groups = current.groups.map { group ->
+                    if (deviceId in group.deviceIds) {
+                        group.copy(deviceIds = group.deviceIds.filterNot { it == deviceId })
+                    } else {
+                        group
+                    }
+                },
+                // The server cascades device-targeted schedules on delete.
+                schedules = current.schedules.filterNot {
+                    it.targetType == ScheduleTarget.DEVICE && it.targetId == deviceId
+                },
                 detailDeviceId = current.detailDeviceId?.takeUnless { it == deviceId },
                 editingDeviceId = current.editingDeviceId?.takeUnless { it == deviceId },
                 removalTargetId = current.removalTargetId?.takeUnless { it == deviceId },
             )
         }
     }
+
+    private fun dropGroup(groupId: String) {
+        _state.update { current ->
+            current.copy(
+                groups = current.groups.filterNot { it.id == groupId },
+                // The server cascades group-targeted schedules on delete.
+                schedules = current.schedules.filterNot {
+                    it.targetType == ScheduleTarget.GROUP && it.targetId == groupId
+                },
+                groupRemovalTargetId = current.groupRemovalTargetId?.takeUnless { it == groupId },
+            )
+        }
+    }
+
+    private fun dropSchedule(scheduleId: String) {
+        _state.update { current ->
+            current.copy(
+                schedules = current.schedules.filterNot { it.id == scheduleId },
+                scheduleRemovalTargetId =
+                    current.scheduleRemovalTargetId?.takeUnless { it == scheduleId },
+            )
+        }
+    }
 }
+
+private fun UpdateScheduleRequest.isEmpty(): Boolean =
+    name == null && targetType == null && targetId == null && action == null &&
+        rrule == null && timeZone == null && startsAtEpochMs == null && enabled == null
 
 private fun Throwable.readableMessage(): String {
     if (this is ClientApiException) {

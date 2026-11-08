@@ -34,6 +34,8 @@ rg -n "require|replace" go-server/go.mod mock/go.mod
 | JSON 配置 | `ContractJson`（Kotlin）+ `encoding/json`（Go） | 各自使用现有配置，不新建第二套序列化层 |
 | 服务端配置分层 | `go-server/internal/config/`（Koanf） | dotenv 文件 + 环境变量复用现有加载器，不手写第二套解析 |
 | 设备/命令/学习状态机 | `go-server/internal/service/devices.go`、`commands.go`、`learning.go` | 扩展对应领域服务；不在 HTTP 路由或客户端复制状态机，不重新合并成 God object |
+| 分组与 fan-out | `go-server/internal/service/groups.go` + `CommandService.IssueBatch` | 成员校验与级联走 GroupService；批量下发复用 `IssueBatch` 的幂等与逐设备错误，不在 HTTP 或客户端复制 |
+| 定时任务 | `go-server/internal/service/schedules.go` + `internal/scheduler/`（gocron v2） | 服务保存 RRULE/时区/DTSTART 与 `nextRunAtEpochMs`；适配层只注册一次性任务，禁止自建 ticker 或第二套 cron |
 | 持久化 | `go-server/internal/repository/store.go` + `repositories.go` | GORM row 模型与仓储；领域服务不直接拼 SQL，不引入第二套 ORM |
 | MQTT 连接与发布 | `go-server/internal/mqtt/mqtt.go` + `go-server/internal/service/gateway.go`（paho.mqtt.golang） | 扩展适配层；MQTT 协议、keepalive、QoS 1、订阅由 paho 负责，禁止再写第二套 MQTT 客户端 |
 | 状态同步 | `shared/.../api/Esp32Api.kt` + `shared/.../App.kt` | v1.2.0 使用轮询；不新增事件流或客户端第二套状态机 |
@@ -69,6 +71,25 @@ rg -n "require|replace" go-server/go.mod mock/go.mod
   `goose_db_version` 表；服务端启动时自动执行，不使用 GORM `AutoMigrate`。
   新增 schema 变更只能追加新的编号迁移，不修改已发布的迁移。
 - **状态同步**：v1.2.0 不提供 SSE；客户端按契约周期轮询快照。
+- **分组**：设备与分组是多对多关系，成员表为 `device_groups`
+  （主键 `(deviceId, groupId)`）。分组不复制设备数据；向分组下发时由
+  `GroupService` 解析当前成员并调用 `CommandService.IssueBatch`，一个
+  `Idempotency-Key` 覆盖整批 fan-out。删除分组级联删除指向它的定时任务，
+  删除设备级联删除其成员关系与指向它的定时任务。
+- **定时**：保存 RFC 5545 RRULE + IANA 时区 + DTSTART
+  （`startsAtEpochMs`），不使用 `once/daily/weekly` 枚举。重复规则解析用
+  `github.com/teambition/rrule-go` v1.8.2；进程内一次性任务用
+  `github.com/go-co-op/gocron/v2` v2.23.0，经 `internal/scheduler` 薄适配，
+  不自建 500 ms ticker、不使用 cron 表达式、不在客户端本地触发。
+  `nextRunAtEpochMs` 物化持久化；启用任务必须有未来 occurrence；
+  重启时 `SCHEDULE_MISSED_GRACE`（默认 2m，上限 1h）内补发一次，更早跳过。
+- **客户端时间**：`shared` 统一使用 kotlinx-datetime 0.8.0
+  （`org.jetbrains.kotlinx:kotlinx-datetime`）。定时页直接用
+  `TimeZone.currentSystemDefault()`、`Instant` 与 `LocalDateTime.Format`
+  完成系统时区、当前时间、本地墙钟解析与格式化；不保留 `expect/actual`
+  或自定义 `LocalDateTime` 工具层。时区与 DST 规则由平台提供
+  （Android `java.time`、Wasm `Intl`），客户端不打包 zoneinfo。
+  定时只提交 `startsAtEpochMs` + IANA 时区，下一次触发由服务端计算。
 - **时间**：Go 使用标准库 `time.Now().UnixMilli()`；测试通过
   `service.WithNow` 注入固定时钟（`go-server/internal/service/options.go`）。
 - **JSON / HTTP / CORS / 错误映射**：Kotlin 客户端复用 `ContractJson`；

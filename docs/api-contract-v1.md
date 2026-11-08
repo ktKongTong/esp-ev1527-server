@@ -1,10 +1,11 @@
 # ESP32 Control 接口、状态机与数据流契约 v1
 
-- 状态：**已实现**（`CONTRACT_VERSION = "2.2.0"`）
-- 日期：2026-11-03
+- 状态：**已实现**（`CONTRACT_VERSION = "2.3.0"`）
+- 日期：2026-11-03（最近更新 2026-11-08：分组与定时）
 - 适用端：`go-server`、`androidApp`、`webApp`
-- 覆盖范围：**控制设备开关、学习新设备、编辑设备信息、移除旧设备**，以及这些流程依赖的
-  网关状态机、设备生命周期、命令发布语义、学习会话状态机和轮询一致性
+- 覆盖范围：**控制设备开关、学习新设备、编辑设备信息、移除旧设备、设备分组与定时任务**，
+  以及这些流程依赖的网关状态机、设备生命周期、命令发布语义、学习会话状态机、
+  定时调度语义和轮询一致性
 
 > 本文定义协议与状态机。DTO、枚举与 `ContractJson` 已落在
 > [`contract`](../contract) 模块，服务端路由与 UI 均以该模块为准；
@@ -14,17 +15,18 @@
 
 ## 0. 摘要
 
-系统里只有网关连接、接收器和学习会话是状态机；设备本身没有状态。
+系统里只有网关连接、接收器、学习会话和定时任务是状态机；设备本身没有状态。
 服务端保存的是遥控器的两个码，不保存执行结果：
 
 | 状态机 | 作用 | 影响 |
 | --- | --- | --- |
-| 网关连接状态机 | MQTT/LWT 决定网关是否在线 | 控制与学习的前置条件 |
+| 网关连接状态机 | MQTT/LWT 决定网关是否在线 | 控制、学习与定时下发的前置条件 |
 | 网关接收器状态 | 315MHz 接收器是否在工作、是否上报过信号 | 学习的信号来源；没有它就没有捕获 |
 | 设备生命周期 | `active → removed` | 码资源是否释放 |
 | 学习会话状态机 | 采集开码 → 候选确认 → 采集关码 → 候选确认 → 待保存 | 新设备如何被发现、确认、入库 |
+| 定时任务 | `enabled` + `nextRunAtEpochMs` 决定下一次触发；规则耗尽后不再有下一次 | 到点向设备或分组下发开/关码 |
 
-三个核心结论：
+四个核心结论：
 
 1. **控制是“两个显式动作”**，不是 `toggle`，也不维护设备状态。`POST commands`
    发送 `codeOn` 或 `codeOff`；202 只代表已交给 MQTT，315MHz 单向链路没有回执，
@@ -38,6 +40,10 @@
    服务端只识别“哪个码被重复按了 3 次”，**不猜测它是开还是关**；开/关由客户端交互确认。
 3. **移除是服务端生命周期终止**：立即拒绝新命令、阻止尚未发布的发布动作、
    释放开/关码、保留 tombstone，并通知所有客户端；不会向网关发送“删除”指令。
+4. **分组是成员关系，定时是服务端触发器**：分组不复制设备，也不改变设备生命周期；
+   定时不保存“一次/每天/每周”类型，而是保存 RFC 5545 RRULE + IANA 时区 + DTSTART，
+   由服务端计算 `nextRunAtEpochMs`。触发只是复用命令发布路径，315MHz 仍然没有回执，
+   所以定时结果只表示“已交给 MQTT”或“被跳过”。
 
 接口速查：
 
@@ -49,6 +55,17 @@
 | `PATCH` | `/api/v1/devices/{id}` | `200 Device` | 编辑名称或位置 |
 | `POST` | `/api/v1/devices/{id}/commands` | `202 CommandDispatched` | 发送开码或关码 |
 | `DELETE` | `/api/v1/devices/{id}` | `204` | 移除设备 |
+| `GET` | `/api/v1/groups` | `200 GroupListResponse` | 分组列表 |
+| `POST` | `/api/v1/groups` | `201 Group` | 创建分组 |
+| `GET` | `/api/v1/groups/{id}` | `200 Group` | 单分组 |
+| `PATCH` | `/api/v1/groups/{id}` | `200 Group` | 编辑名称或成员 |
+| `DELETE` | `/api/v1/groups/{id}` | `204` | 删除分组（连带删除指向它的定时） |
+| `POST` | `/api/v1/groups/{id}/commands` | `202 GroupCommandDispatched` | 向分组成员逐设备下发 |
+| `GET` | `/api/v1/schedules` | `200 ScheduleListResponse` | 定时列表 |
+| `POST` | `/api/v1/schedules` | `201 Schedule` | 创建定时 |
+| `GET` | `/api/v1/schedules/{id}` | `200 Schedule` | 单定时 |
+| `PATCH` | `/api/v1/schedules/{id}` | `200 Schedule` | 编辑或启停定时 |
+| `DELETE` | `/api/v1/schedules/{id}` | `204` | 删除定时 |
 | `POST` | `/api/v1/learning/sessions` | `201 LearningSession` | 开始学习（先采集开码） |
 | `GET` | `/api/v1/learning/sessions/{id}` | `200 LearningSession` | 轮询学习状态 |
 | `POST` | `/api/v1/learning/sessions/{id}/candidates/{candidateId}/accept` | `200 LearningSession` | 确认当前槽位的候选码 |
@@ -102,6 +119,12 @@
 | 命令 | 一次显式控制请求；发布后即结束，不持久化、不产生 `commandId` |
 | tombstone | 设备移除后的墓碑记录，用于幂等和 `410` |
 | revision | 学习会话版本号，每次变更递增，用于轮询去旧 |
+| 分组 | 设备 ID 的命名集合；多对多，一个设备可属于多个分组，分组不复制设备数据 |
+| 定时任务 | 目标（设备或分组）+ 动作 + 重复规则；由服务端在到点时复用命令发布路径 |
+| RRULE | RFC 5545 重复规则，例如 `FREQ=DAILY`、`FREQ=WEEKLY;BYDAY=MO,WE`；线上不含 `DTSTART` |
+| DTSTART | 规则起点，由 `startsAtEpochMs` 承载；第一次触发是起点及其之后的首个 occurrence |
+| 触发结果 | `dispatched` / `partial` / `skipped` / `failed`；只描述发布动作，不描述物理执行 |
+| 错过宽限 | `SCHEDULE_MISSED_GRACE` 定义的重启补发窗口；超出的错过触发被跳过 |
 
 ### 1.3 单向链路假设
 
@@ -231,6 +254,25 @@ Server ──200 Device（更新后的快照）──► Client ──替换本�
   编辑先提交时，命令照常使用未受影响的码。
 - 其他客户端在下一次 `GET /devices` 轮询中看到新名称/位置。
 
+### 2.6 分组下发与定时触发
+
+```text
+Client ──POST /groups/{id}/commands──► GroupService ──当前成员──► CommandService.IssueBatch
+                                                                     └──► MQTT ──► Gateway
+
+Scheduler ──到点──► ScheduleService.Fire ──校验 nextRunAt──► IssueBatch（设备或分组成员）
+                          │
+                          ├── 持久化 nextRunAt / lastRunAt / lastResult
+                          └── 按新的 nextRunAt 注册下一次一次性任务
+```
+
+- 两条路径最终都调用同一个 `IssueBatch`，因此幂等、网关在线检查与逐设备错误
+  语义完全一致。
+- 分组下发使用客户端 key 作为 seed；定时触发使用
+  `scheduleId|nextRunAtEpochMs` 作为 seed，同一 occurrence 重试不会重复发射。
+- 定时不改变设备、分组或码归属；触发失败的记录只用于展示，不重试、不排队。
+- 网关离线时定时仍会“到点”，但结果是 `skipped`，不会在网关恢复后补发。
+
 ---
 
 ## 3. 共享 contract 模块
@@ -288,19 +330,22 @@ go-server/internal/contract/contract.go ── mirrors ──► contract (Go st
 ```
 MQTT (internal/mqtt) ──► GatewayIngest (service/gateway.go) ──► LearningService
 HTTP (internal/server) ──► DeviceService / CommandService / LearningService
+                       └─► GroupService / ScheduleService
 Services ──────────────► Repositories (repository) ──► GORM ──► Turso
 CommandService ────────► mqtt.Transmitter ──► MQTT
+ScheduleService ───────► scheduler (gocron adapter) ──► Fire ──► CommandService.IssueBatch
 ```
 
 | 层 | 位置 | 职责 |
 | --- | --- | --- |
-| 组合根 | `go-server/main.go` | 读取配置、创建数据库/服务/MQTT、启动 HTTP 与定时器 |
+| 组合根 | `go-server/main.go` | 读取配置、创建数据库/服务/MQTT、启动 HTTP 与调度器 |
 | 配置 | `go-server/internal/config/` | `Config` 类型与 Koanf 加载（dotenv + 环境变量） |
 | HTTP | `go-server/internal/server/http.go` | 参数/请求体解析、状态码映射；不含状态机 |
-| 领域服务 | `go-server/internal/service/` | 设备、命令发布、学习状态机、网关运行时状态 |
+| 领域服务 | `go-server/internal/service/` | 设备、命令发布、学习状态机、分组、定时、网关运行时状态 |
 | 数据访问 | `go-server/internal/repository/repositories.go` | 仓储与 row ↔ contract 映射 |
 | 持久化 | `go-server/internal/repository/store.go` | GORM row 模型、Turso 连接 |
 | 迁移 | `go-server/internal/repository/migrate.go` + `migrations/` | goose 版本化 SQL，启动时执行 |
+| 调度器适配 | `go-server/internal/scheduler/` | gocron 一次性任务注册/注销与安全回调；不含重复规则 |
 | MQTT | `go-server/internal/mqtt/mqtt.go` | paho 连接、订阅、发布、重连；命令帧适配 |
 | 跨语言 DTO | `go-server/internal/contract/contract.go` | 镜像 `contract` 的 DTO、枚举与版本常量 |
 | 错误 / 日志 / ID | `go-server/internal/apierror/`、`logging/`、`idgen/` | 统一错误信封、slog、ID 生成 |
@@ -330,6 +375,14 @@ CommandService ────────► mqtt.Transmitter ──► MQTT
   - `device_tombstones`：移除时间，保留 24h。
   - `idempotency`：幂等 key → 请求指纹 + 发布时间，TTL 10min。
     这是去重状态，不是命令历史。
+  - `groups`：分组 ID、名称与时间戳。
+  - `device_groups`：`(deviceId, groupId, addedAtEpochMs)` 成员关系，主键
+    `(deviceId, groupId)`，并在 `(groupId, deviceId)` 上建索引。多对多，
+    删除设备或分组时清理对应行。
+  - `schedules`：目标、动作、`rrule`、`timeZone`、`startsAtEpochMs`(DTSTART)、
+    `enabled`、物化的 `nextRunAtEpochMs`、最近一次执行的
+    `lastRunAtEpochMs` / `lastResult` / `lastError` 与时间戳。
+    `(enabled, nextRunAtEpochMs)` 与 `(targetType, targetId)` 建索引。
 - 事务：跨表写入使用 GORM `Transaction`；MQTT 发布不在事务内，
   避免网络 I/O 阻塞数据库事务。
 - 运行时状态：
@@ -393,7 +446,9 @@ val ContractJson = Json {
 
 ### 4.4 幂等
 
-- `POST /devices/{id}/commands` 必须带 `Idempotency-Key`。
+- `POST /devices/{id}/commands` 与 `POST /groups/{id}/commands` 必须带
+  `Idempotency-Key`。分组请求的一个 key 覆盖整批 fan-out：服务端按
+  `key|deviceId` 派生每台设备的去重 key。
 - 同一 key + 同请求体，10 分钟内不重复发布；返回首次发布的时间戳。
 - 同一 key + 不同请求体 → `409 idempotency_conflict`。
 - 原请求仍在发布中 → `409 command_in_progress`；发布失败会释放 key，允许重试。
@@ -421,12 +476,17 @@ val ContractJson = Json {
 | 设备 tombstone 保留 | 24 h（可配置） |
 | 学习会话终态保留 | 5 min（之后 `404`；进程重启立即丢失） |
 | 空闲设备列表轮询 | 30 s |
+| 分组/定时列表轮询 | 30 s（与设备列表同一次刷新） |
 | 学习会话轮询 | 1 s |
+| 分组名称 | trim 后 1–64 字符 |
+| 定时名称 | 可选，trim 后最多 64 字符，可为空 |
+| RRULE | 必填、单行；不接受 `DTSTART`，起点只由 `startsAtEpochMs` 提供 |
+| 定时错过补发窗口 | 默认 2 min，可配置上限 1 h |
 
 ### 4.6 CORS 与安全边界
 
 - 开发：允许 `*`；生产：Origin 白名单。
-- 方法：`GET, POST, DELETE, OPTIONS`。
+- 方法：`GET, POST, PATCH, DELETE, OPTIONS`。
 - 请求头：`Accept, Authorization, Content-Type, Idempotency-Key, X-Request-Id`。
 - 暴露头：`X-Request-Id`、`Idempotent-Replayed`。
 - 不使用 Cookie；凭据只放在 `Authorization` 头，不放在 URL 或查询参数。
@@ -669,6 +729,40 @@ stateDiagram-v2
 | 有活动学习会话 | 允许 | `409 learning_busy` | 仅当前会话 | 允许 |
 | 设备 `removed` | `410 device_removed` | 允许（学新设备） | — | `204`（幂等） |
 | 学习会话 `ready` | 允许 | `409 learning_busy` | 允许 | 允许 |
+
+### 5.6 定时任务状态
+
+定时任务不是“类型枚举 + 客户端计算”，而是服务端保存的规则与物化的下一次触发：
+
+```
+enabled=true,  next != null   ──到点──►  执行一次，next = 下一个 occurrence
+        │                                        │
+        │ 规则耗尽（如 COUNT=1）                  │
+        ▼                                        ▼
+enabled=true,  next = null（已耗尽）     仍有 next → 继续等待
+        ▲
+        │ PATCH enabled=true（从 now 重新计算）
+        │
+enabled=false, next = 已存值（不注册计时器）
+```
+
+规则：
+
+- `startsAtEpochMs` 是 DTSTART；第一次触发是 DTSTART 当天/当时及其之后的首个
+  occurrence。`DTSTART` 不能写在 `rrule` 字符串里。
+- 创建、修改规则、重新启用时，服务端按 `now` 重新计算 `nextRunAtEpochMs`；
+  启用状态要求存在未来 occurrence，否则 `400 invalid_schedule`。
+- 只改名称/目标/动作时保留已存的 `nextRunAtEpochMs`，不会把已耗尽的一次性任务
+  重新激活。
+- 已耗尽的任务保持 `enabled=true`、`nextRunAtEpochMs=null`；客户端显示“没有后续触发”。
+  再次 `PATCH enabled=true` 不是幂等无操作：它会用当前时间重算下一次。
+- `enabled=false` 的任务不注册计时器；`nextRunAtEpochMs` 保留为上次计算值，
+  仅用于展示。
+- 进程重启：`nextRunAtEpochMs > now` 的任务重新注册；`now - next` 在
+  `SCHEDULE_MISSED_GRACE` 内补发一次；更早的错过跳过并从 `now` 重算，
+  避免长时间停机后的补发风暴。
+- 到点执行前重新读取任务并核对 `nextRunAtEpochMs`；编辑后残留的旧计时器
+  不会用新定义提前触发。
 
 ---
 
@@ -1001,7 +1095,193 @@ data class LearningTestResult(
 > `frameCount` 与 `hitCount` 的差异是刻意保留的：一次按键通常产生多帧，
 > 客户端应展示“3 次按键 / 7 帧”，而不是把 7 帧误读成 7 次按键。
 
-### 6.5 实时性与快照
+### 6.5 分组
+
+```kotlin
+@Serializable
+data class Group(
+    val id: String,
+    val name: String,
+    val deviceIds: List<String>,
+    val createdAtEpochMs: Long,
+    val updatedAtEpochMs: Long,
+)
+
+@Serializable
+data class CreateGroupRequest(
+    val name: String,
+    val deviceIds: List<String>,
+)
+
+/** 编辑请求：null 表示该字段不变；至少提供一个字段。 */
+@Serializable
+data class UpdateGroupRequest(
+    val name: String? = null,
+    val deviceIds: List<String>? = null,
+)
+
+@Serializable
+data class CommandFailure(
+    val deviceId: String,
+    val code: String,
+)
+
+@Serializable
+data class GroupCommandDispatched(
+    val groupId: String,
+    val action: CommandAction,
+    val dispatchedCount: Int,
+    val failedCount: Int,
+    val failures: List<CommandFailure>,
+    val dispatchedAtEpochMs: Long,
+)
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `deviceIds` | 当前成员，按请求顺序去重；空数组合法（空分组） |
+| `createdAtEpochMs` / `updatedAtEpochMs` | 创建/最后修改时间（含成员变化） |
+| `dispatchedCount` | 成功交给 MQTT 的设备数 |
+| `failedCount` / `failures` | 单设备失败数量与错误码；RF 链路无回执，部分失败是正常结果 |
+
+规则：
+
+- 一个设备可以同时属于多个分组；成员关系不复制设备数据，也不改变设备生命周期。
+- `deviceIds` 中的每个 ID 必须是当前 active 设备；ID 形状非法返回
+  `400 invalid_device_id`，未知设备返回 `404 device_not_found`，
+  tombstone 内返回 `410 device_removed`。重复 ID 去重。
+- 分组名 trim 后 1–64 字符；`PATCH` 空对象返回 `400 invalid_request`。
+- 向分组下发时，服务端按当前成员逐设备发布；每台设备失败独立记录，不因一台
+  失败而中止其余设备。
+- 删除分组会删除成员关系与所有指向该分组的定时任务；设备本身不受影响。
+
+示例：
+
+```json
+{
+  "id": "grp_01JC3A7M5N2P8Q4R6S9T1V3W",
+  "name": "东侧鱼塘",
+  "deviceIds": ["dev_01JB2Z6Q8K4M2X9V7R3T5W1Y0A"],
+  "createdAtEpochMs": 1760000000000,
+  "updatedAtEpochMs": 1760000300000
+}
+```
+
+### 6.6 定时任务
+
+```kotlin
+@Serializable
+enum class ScheduleTarget {
+    @SerialName("device") DEVICE,
+    @SerialName("group") GROUP,
+}
+
+@Serializable
+enum class ScheduleResult {
+    @SerialName("dispatched") DISPATCHED,
+    @SerialName("partial") PARTIAL,
+    @SerialName("skipped") SKIPPED,
+    @SerialName("failed") FAILED,
+}
+
+@Serializable
+data class Schedule(
+    val id: String,
+    val name: String,
+    val targetType: ScheduleTarget,
+    val targetId: String,
+    val action: CommandAction,
+    val rrule: String,
+    val timeZone: String,
+    val startsAtEpochMs: Long,
+    val enabled: Boolean,
+    val nextRunAtEpochMs: Long? = null,
+    val lastRunAtEpochMs: Long? = null,
+    val lastResult: ScheduleResult? = null,
+    val lastError: String? = null,
+    val createdAtEpochMs: Long,
+    val updatedAtEpochMs: Long,
+)
+
+@Serializable
+data class CreateScheduleRequest(
+    val name: String = "",
+    val targetType: ScheduleTarget,
+    val targetId: String,
+    val action: CommandAction,
+    val rrule: String,
+    val timeZone: String,
+    val startsAtEpochMs: Long,
+    val enabled: Boolean? = null,   // 默认 true
+)
+
+/** 编辑请求：null 表示该字段不变；至少提供一个字段。 */
+@Serializable
+data class UpdateScheduleRequest(
+    val name: String? = null,
+    val targetType: ScheduleTarget? = null,
+    val targetId: String? = null,
+    val action: CommandAction? = null,
+    val rrule: String? = null,
+    val timeZone: String? = null,
+    val startsAtEpochMs: Long? = null,
+    val enabled: Boolean? = null,
+)
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `name` | 可选显示名；trim 后最多 64 字符，允许空字符串 |
+| `targetType` / `targetId` | `device` 或 `group`；目标必须存在 |
+| `action` | `turn_on` / `turn_off` |
+| `rrule` | RFC 5545 RRULE 值，可带或不带 `RRULE:` 前缀；服务端归一化为不带前缀 |
+| `timeZone` | IANA 时区名，例如 `Asia/Shanghai`；拒绝 `Local` 与未知时区 |
+| `startsAtEpochMs` | DTSTART，必须为正数；按 `timeZone` 解释墙钟时间 |
+| `enabled` | 是否注册计时器；默认 `true` |
+| `nextRunAtEpochMs` | 物化的下一次触发；规则耗尽或从未启用时为 `null` |
+| `lastResult` / `lastError` | 最近一次触发结果与错误码；从未触发为 `null` |
+
+`lastResult` 语义：
+
+| 值 | 含义 |
+| --- | --- |
+| `dispatched` | 所有目标设备都已交给 MQTT |
+| `partial` | 至少一台成功、至少一台失败；`lastError` 是首个失败错误码 |
+| `skipped` | 未发布：`gateway_unavailable`、`device_not_found`、`group_not_found`、`group_empty`、`no_targets` |
+| `failed` | 全部失败或规则计算失败；`lastError` 为错误码 |
+
+示例（每天 08:00，Asia/Shanghai）：
+
+```json
+{
+  "id": "sch_01JC3B8N6P2Q9R5S7T1V4W0X",
+  "name": "早上开增氧机",
+  "targetType": "group",
+  "targetId": "grp_01JC3A7M5N2P8Q4R6S9T1V3W",
+  "action": "turn_on",
+  "rrule": "FREQ=DAILY",
+  "timeZone": "Asia/Shanghai",
+  "startsAtEpochMs": 1762732800000,
+  "enabled": true,
+  "nextRunAtEpochMs": 1762732800000,
+  "lastRunAtEpochMs": null,
+  "lastResult": null,
+  "lastError": null,
+  "createdAtEpochMs": 1762700000000,
+  "updatedAtEpochMs": 1762700000000
+}
+```
+
+调度与幂等：
+
+- 每次触发使用 `seed = scheduleId|nextRunAtEpochMs`；每台设备的幂等 key 是
+  `b_` + `SHA-256(seed|deviceId)` 的前 48 个十六进制字符。同一 occurrence
+  重试会命中去重缓存，而不是再次发射。
+- 分组命令使用客户端提供的 `Idempotency-Key` 作为 seed，按同样规则派生
+  每台设备的 key；一个 key 覆盖整批 fan-out。
+- 定时不写命令历史；`lastRunAtEpochMs` / `lastResult` / `lastError` 只保留最近一次。
+
+### 6.7 实时性与快照
 
 v1 不提供事件流。所有状态变化通过快照接口读取：
 
@@ -1009,6 +1289,8 @@ v1 不提供事件流。所有状态变化通过快照接口读取：
 | --- | --- | --- |
 | 设备列表 | `GET /devices` | 空闲 30 s |
 | 单设备 | `GET /devices/{id}` | 按需 |
+| 分组列表 | `GET /groups` | 空闲 30 s |
+| 定时列表 | `GET /schedules` | 空闲 30 s |
 | 学习会话 | `GET /learning/sessions/{id}` | 学习进行中 1 s |
 | 网关/接收器 | `GET /health` | 30 s；学习页进入时立即 |
 
@@ -1021,7 +1303,7 @@ v1 不提供事件流。所有状态变化通过快照接口读取：
 - 快照是最终依据；客户端不尝试拼接增量或补齐历史。
 - 轮询失败不清空已有数据，保留上次快照并提示连接问题。
 
-### 6.6 错误
+### 6.8 错误
 
 ```json
 {
@@ -1419,6 +1701,8 @@ active --DELETE--> removed
 | --- | --- |
 | 学习进行中 | `GET /learning/sessions/{id}` 每 1 s |
 | 普通设备列表 | `GET /devices` 每 30 s |
+| 分组列表 | `GET /groups` 每 30 s |
+| 定时列表 | `GET /schedules` 每 30 s |
 | 网关状态 | 随 `GET /health` 每 30 s |
 
 规则：
@@ -1426,7 +1710,10 @@ active --DELETE--> removed
 - 页面不可见时暂停轮询；恢复可见时立即拉一次快照。
 - 学习会话进入终态（`completed/expired/failed/cancelled`）后停止 1 s 轮询。
 - 学习写操作成功后立即刷新相关快照，不等待下一个轮询周期。
+- 分组/定时写操作成功后用响应替换对应列表项，不等待下一个轮询周期。
 - 控制是 fire-and-forget，不需要轮询结果。
+- 定时由服务端触发，客户端只轮询 `nextRunAtEpochMs` / `lastResult`；
+  客户端不得自行计算 occurrence 或本地触发。
 - 轮询失败按有界退避重试，不清空已展示数据。
 
 ### 10.3 快照一致性
@@ -1589,6 +1876,128 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 - 幂等
 - 会话状态变为 `cancelled`；后续 `GET` 在保留期内返回该终态
 
+### 11.14 分组
+
+#### `GET /api/v1/groups`
+
+- 200 `GroupListResponse`（`groups` + `serverTimeEpochMs`）
+- 设备是否在线、网关是否在线都不影响列表
+
+#### `POST /api/v1/groups`
+
+```json
+{ "name": "东侧鱼塘", "deviceIds": ["dev_01JB..."] }
+```
+
+- 201 `Group`，`Location: /api/v1/groups/{id}`
+- 400 `invalid_request`：名称为空或超过 64 字符
+- 400 `invalid_device_id`；404 `device_not_found`；410 `device_removed`：成员非法
+- `deviceIds` 可省略或为空数组，创建空分组
+- 重复 `deviceIds` 去重后保存
+
+#### `GET /api/v1/groups/{groupId}`
+
+- 200 `Group`
+- 400 `invalid_group_id`
+- 404 `group_not_found`
+
+#### `PATCH /api/v1/groups/{groupId}`
+
+```json
+{ "name": "西侧鱼塘", "deviceIds": ["dev_01JB...", "dev_01JC..."] }
+```
+
+- 200 `Group`（更新后的完整快照）
+- 400 `invalid_request`：空对象或名称非法
+- 400 `invalid_device_id`；404 `device_not_found`；410 `device_removed`：成员非法
+- 400 `invalid_group_id`；404 `group_not_found`
+- 省略或 `null` 的字段不变；提供 `deviceIds` 时整体替换成员集合
+- 成员变化立即影响后续分组下发与定时 fan-out
+
+#### `DELETE /api/v1/groups/{groupId}`
+
+- 204
+- 400 `invalid_group_id`；404 `group_not_found`（重复删除返回 404，不是幂等 204）
+- 在同一事务中删除成员关系与所有 `targetType=group AND targetId=该分组` 的定时任务
+- 设备本身不受影响；不会发送 MQTT
+
+#### `POST /api/v1/groups/{groupId}/commands`
+
+```http
+POST /api/v1/groups/grp_01JC.../commands HTTP/1.1
+Authorization: Bearer <AUTH_TOKEN>
+Content-Type: application/json
+Idempotency-Key: 6f0e5b3a-9d0c-4c1e-8a3f-2d7b9c6a1e42
+
+{"action":"turn_on"}
+```
+
+- 202 `GroupCommandDispatched`
+- 必须带 `Idempotency-Key`（1–64 字符）；一个 key 覆盖整批 fan-out
+- 404 `group_not_found`；409 `group_empty`；503 `gateway_unavailable`
+- 部分设备失败仍返回 202：`failures` 列出 `deviceId` 与错误码，
+  例如 `device_not_found`、`device_removed`、`gateway_unavailable`
+- 不保存命令历史；返回的 `dispatchedAtEpochMs` 是本批的完成时间
+
+### 11.15 定时
+
+#### `GET /api/v1/schedules`
+
+- 200 `ScheduleListResponse`（`schedules` + `serverTimeEpochMs`）
+- 包含启用、禁用与已耗尽的定时
+
+#### `POST /api/v1/schedules`
+
+```json
+{
+  "name": "早上开增氧机",
+  "targetType": "group",
+  "targetId": "grp_01JC...",
+  "action": "turn_on",
+  "rrule": "FREQ=DAILY",
+  "timeZone": "Asia/Shanghai",
+  "startsAtEpochMs": 1762732800000,
+  "enabled": true
+}
+```
+
+- 201 `Schedule`，`Location: /api/v1/schedules/{id}`
+- 400 `invalid_schedule`：RRULE 非法、时区未知、`startsAtEpochMs` 非正、
+  启用但无未来 occurrence、名称为空或超过 64 字符、目标类型非法
+- 404 `device_not_found` / `device_removed` / `group_not_found`：目标不存在
+- 400 `invalid_device_id` / `invalid_group_id`：目标 ID 形状非法
+- `enabled` 省略时默认 `true`；禁用任务不要求存在未来 occurrence
+- 成功创建后按 `nextRunAtEpochMs` 注册服务端计时器；注册失败会回滚该行并返回 500
+
+#### `GET /api/v1/schedules/{scheduleId}`
+
+- 200 `Schedule`
+- 400 `invalid_schedule_id`
+- 404 `schedule_not_found`
+
+#### `PATCH /api/v1/schedules/{scheduleId}`
+
+```json
+{ "rrule": "FREQ=WEEKLY;BYDAY=MO,WE,FR", "timeZone": "Asia/Shanghai" }
+```
+
+- 200 `Schedule`（更新后的完整快照）
+- 400 `invalid_request`：空对象
+- 400 `invalid_schedule`：规则/时区/起点非法，或改动后启用但无未来 occurrence
+- 400 `invalid_schedule_id`；404 `schedule_not_found`
+- 省略或 `null` 的字段不变；只改名称/目标/动作时保留已存的 `nextRunAtEpochMs`
+- 改 `rrule` / `timeZone` / `startsAtEpochMs` 或从禁用切到启用时，按 `now`
+  重新计算 `nextRunAtEpochMs`；旧计时器被注销
+- `enabled=false` 只注销计时器，不删除定义；`enabled=true` 重新计算下一次
+- 修改成功后重新注册计时器；注册失败只记录日志，不回滚已保存的定义
+  （重启时会从 `nextRunAtEpochMs` 恢复）
+
+#### `DELETE /api/v1/schedules/{scheduleId}`
+
+- 204
+- 400 `invalid_schedule_id`；404 `schedule_not_found`（重复删除返回 404）
+- 注销计时器；不影响目标设备或分组
+
 ---
 
 ## 12. 错误码
@@ -1602,6 +2011,12 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 | `unsupported_media_type` | 415 | 非 JSON |
 | `device_not_found` | 404 | 设备不存在 |
 | `device_removed` | 410 | 设备已移除 |
+| `invalid_group_id` | 400 | 分组 ID 非法 |
+| `group_not_found` | 404 | 分组不存在 |
+| `group_empty` | 409 | 分组没有成员，无法下发 |
+| `invalid_schedule_id` | 400 | 定时 ID 非法 |
+| `schedule_not_found` | 404 | 定时不存在 |
+| `invalid_schedule` | 400 | RRULE/时区/DTSTART/目标类型/名称非法，或启用但无未来触发 |
 | `command_in_progress` | 409 | 同一幂等 key 的原请求仍在发布中 |
 | `idempotency_conflict` | 409 | 同 key 不同请求体 |
 | `gateway_unavailable` | 503 | 网关离线/发布失败 |
@@ -1624,7 +2039,7 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 ## 13. 版本演进与兼容
 
 - 路径版本 `/api/v1`，`HealthResponse.apiVersion = "1"`。
-- `contract` 模块语义版本 `CONTRACT_VERSION = "2.2.0"`。
+- `contract` 模块语义版本 `CONTRACT_VERSION = "2.3.0"`。
   - `1.1.0`（2026-11-03）：学习改为“按键聚类 + 候选确认”模型；
     新增 candidate accept / rescan，移除旧的重学/手动指定接口。
   - `1.2.0`（2026-11-03）：移除 SSE 事件类型与 `GET /api/v1/events`；
@@ -1657,6 +2072,14 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
   - 协议版本不变（2026-11-07）：移除 Ktor/Kotlin Native 服务端；
     `go-server` 成为唯一实现，持久化从本地 SQLite + Room3 切换到
     Turso Cloud + GORM。HTTP/MQTT 契约、状态机与表结构保持不变。
+  - `2.3.0`（2026-11-08）：新增设备分组与定时任务。
+    分组是多对多成员关系（`groups` + `device_groups`），支持创建、编辑、删除与
+    批量下发；定时保存 RFC 5545 RRULE + IANA 时区 + DTSTART，由服务端计算并
+    持久化 `nextRunAtEpochMs`，到点复用命令发布路径。新增
+    `Group` / `Schedule` 等 DTO、`group_*` / `schedule_*` 错误码与
+    `GET|POST|PATCH|DELETE /groups`、`POST /groups/{id}/commands`、
+    `GET|POST|PATCH|DELETE /schedules` 端点；属于向后兼容的增量变更。
+    删除分组会连带删除指向它的定时任务；删除设备会连带删除指向该设备的定时任务。
 - 允许：新增响应字段、新增端点、新增错误码（旧客户端忽略未知字段）。
 - 需要客户端先行：新增枚举值（严格反序列化会失败）。
 - 破坏性：删除/重命名字段、改变类型/语义、改变状态码、改变状态机语义
@@ -1734,7 +2157,8 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 
 ### 14.5 重连与一致性
 
-- 启动/重连：`GET health` + `GET devices`；设备没有 revision。
+- 启动/重连：`GET health` + `GET devices` + `GET groups` + `GET schedules`；
+  设备、分组与定时都没有 revision。
 - 按第 10 节的周期轮询；页面恢复可见时立即拉一次快照。
 - 网络恢复后先拉快照，再恢复轮询；不依赖增量补齐。
 - 快照是最终依据。
@@ -1754,6 +2178,45 @@ X-Request-Id: 5d3f0a6e-2c7b-4f8a-9e10-3b6c1d2e4f50
 | `learning.state=ready` | 等待试发/命名/保存 |
 | `learning.state=expired` | 学习超时 |
 | `learning.failureReason=insufficient_hits` | 按键次数不足（需要同一键 3 次） |
+| `scheduleResult=dispatched` | 已下发（不代表已执行） |
+| `scheduleResult=partial` | 部分设备下发失败 |
+| `scheduleResult=skipped` | 已跳过（网关离线或目标不存在） |
+| `scheduleResult=failed` | 下发失败 |
+| `schedule.targetType=group` | 分组 |
+
+### 14.7 分组
+
+1. 分组页展示名称、成员数量与成员名称；成员名来自设备列表，不额外请求。
+2. 新建/编辑用一个对话框：名称输入 + 设备多选（复选框）。一个设备可被多个分组选中。
+3. 保存 `POST /groups` 或 `PATCH /groups/{id}`；200/201 用返回的 `Group`
+   替换或追加本地列表项，关闭对话框，不等待轮询。
+4. 400/404/410 → 在对话框内展示错误，保留用户输入；目标设备刚好被删除时
+   刷新设备与分组列表。
+5. “全开/全关”调用 `POST /groups/{id}/commands`，每次生成新的 `Idempotency-Key`。
+6. 202 → 用 `dispatchedCount` / `failedCount` 显示结果提示；`failures` 只展示错误码，
+   不推断物理执行结果。
+7. 网关离线或分组为空时禁用下发按钮。
+8. 删除需二次确认，并提示“指向该分组的定时任务会一并删除”。
+9. 删除设备或收到 404/410 时，本地同步移除该设备在所有分组中的成员关系。
+
+### 14.8 定时
+
+1. 定时页展示名称、目标、动作、RRULE、下次/上次触发与最近结果。
+2. 新建/编辑对话框提供：名称（可选）、目标类型（设备/分组）、目标、动作（开/关）、
+   重复预设（一次/每天/每周/自定义 RRULE）、开始时间（本机墙钟）、启用开关。
+3. “一次”映射为 `FREQ=DAILY;COUNT=1`；“每天” `FREQ=DAILY`；“每周” `FREQ=WEEKLY`；
+   “自定义”直接提交用户输入的 RRULE。客户端不把预设持久化为类型字段。
+4. 时区固定提交设备当前 IANA 时区（kotlinx-datetime
+   `TimeZone.currentSystemDefault().id`，由平台 `java.time`/`Intl` 提供），
+   并在对话框中显示；编辑其他时区创建的任务会把时区改为当前设备时区。
+5. 开始时间按本地墙钟解析为 epoch 毫秒后提交；格式错误在客户端拦截，
+   RRULE/时区/未来 occurrence 由服务端校验。
+6. 保存 `POST /schedules` 或 `PATCH /schedules/{id}`：编辑时只提交变化的字段；
+   没有变化则直接关闭对话框，不发请求。
+7. 开关直接 `PATCH { "enabled": ... }`；启用失败（规则已耗尽）时展示服务端错误，
+   开关回到轮询得到的值。
+8. 已耗尽任务显示“没有后续触发”；客户端不自行计算下一次触发时间。
+9. 删除需二次确认；删除设备或分组时，本地同步移除指向它的定时任务。
 
 ---
 
@@ -1941,6 +2404,27 @@ SQLite 切换到 Turso 而改变。
 - [ ] 服务端重启后网关状态为 `unknown`，直到 retained LWT/version 到达。
 - [ ] MQTT 断开期间命令发布返回 503，进程不退出；重连后恢复。
 
+### 18.6 分组与定时
+
+- [ ] 同一设备加入两个分组；两个分组都包含它，设备本身只保存一份。
+- [ ] `PATCH /groups/{id}` 只传 `name` 时成员不变；只传 `deviceIds` 时名称不变。
+- [ ] 分组含未知设备 → `404 device_not_found`；已移除设备 → `410 device_removed`。
+- [ ] 向含 3 台设备的分组下发，其中 1 台刚被删除 → 202，
+      `dispatchedCount=2`、`failedCount=1`，`failures` 含 `device_not_found`。
+- [ ] 向空分组下发 → `409 group_empty`；网关离线 → `503 gateway_unavailable`。
+- [ ] 删除分组后，其成员关系与指向它的定时任务都被删除；设备仍存在。
+- [ ] 删除设备后，其成员关系与指向它的定时任务都被删除。
+- [ ] 创建 `FREQ=DAILY;COUNT=1` 且 DTSTART 在未来的任务 → `nextRunAtEpochMs=DTSTART`；
+      触发一次后 `nextRunAtEpochMs=null`、`lastResult=dispatched`，任务仍 `enabled`。
+- [ ] 同一任务改名称 → 已耗尽的 `nextRunAtEpochMs` 保持 `null`，不重新激活。
+- [ ] 禁用后 `GET` 仍返回该任务，`nextRunAtEpochMs` 保留；重新启用按当前时间重算。
+- [ ] 创建启用任务但规则无未来 occurrence → `400 invalid_schedule`；
+      创建同样规则的禁用任务 → 201。
+- [ ] `timeZone=Asia/Shanghai`、`FREQ=DAILY`、DTSTART 08:00 → 次日 00:00 UTC 触发。
+- [ ] 网关离线时触发 → `lastResult=skipped`、`lastError=gateway_unavailable`，不发布。
+- [ ] 同一 occurrence 的定时器重复回调 → 只发布一次（幂等 key 固定）。
+- [ ] 服务端重启：未来任务恢复计时器；2 分钟内的错过补发一次；更早的错过跳过。
+
 ---
 
 ## 19. 设计取舍记录
@@ -1968,3 +2452,10 @@ SQLite 切换到 Turso 而改变。
 | 17 | 接受开码候选是否要求网关在线？ | 要求；因为下一步必须继续采集关码。接受关码不要求在线 |
 | 18 | 60s 是每个槽位还是整个学习流程？ | 建议每个槽位独立 60s；开/关两段合计最多约 3 分钟（含候选确认），而不是总共 60s |
 | 19 | 编辑设备信息用 `PATCH` 还是 `PUT`？ | `PATCH`：只提交变化的字段，允许单独改名或改位置；不引入 revision 并发控制，后写覆盖先写 |
+| 20 | 分组是设备上的标签，还是独立实体？ | 独立实体 + `device_groups` 多对多关系：成员可整体替换，删除分组可精确级联，设备删除也能反查 |
+| 21 | 定时用 `once/daily/weekly` 枚举还是重复规则？ | RFC 5545 RRULE + IANA 时区 + DTSTART。枚举无法表达“每月 1 日”“工作日”等闹钟式需求；预设只是客户端快捷方式，不进入协议 |
+| 22 | 定时器用自建 ticker 还是库？ | 用 gocron v2 的一次性任务 + rrule-go 解析规则；不自建 500 ms ticker，也不解析 cron 表达式 |
+| 23 | 服务重启后错过的触发如何处理？ | 宽限窗口（默认 2 min，上限 1 h）内补发一次；更早的错过跳过并从当前时间重算，避免补发风暴 |
+| 24 | 编辑定时是否重算下一次触发？ | 只有规则/时区/DTSTART 变化或从禁用转启用时重算；只改名称/目标/动作保留已存值，避免把已耗尽的一次性任务重新激活 |
+| 25 | 定时是否需要命令历史？ | 不保存；只保留最近一次 `lastRunAtEpochMs` / `lastResult` / `lastError`，与“控制不保存命令历史”一致 |
+| 26 | 客户端是否引入 kotlinx-datetime？ | 引入 0.8.0。`commonMain` 直接使用 `TimeZone.currentSystemDefault()`、`Instant`、`LocalDateTime.Format`；时区与 DST 由平台 `java.time`/`Intl` 提供，不打包 zoneinfo，不保留 `expect/actual` 或自定义 `LocalDateTime` 工具层 |

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/knadh/koanf/parsers/dotenv"
 	"github.com/knadh/koanf/providers/env"
@@ -23,6 +24,8 @@ const (
 	defaultMQTTPort      = 1883
 	defaultMQTTWSPath    = "/mqtt"
 	defaultMQTTKeepAlive = 60
+	defaultScheduleGrace = 2 * time.Minute
+	maxScheduleGrace     = time.Hour
 )
 
 // LoadConfig layers .env in the working directory and environment variables
@@ -122,6 +125,23 @@ func LoadConfig() (Config, error) {
 		gatewayClientID = defaultGatewayClient
 	}
 
+	missedGrace := defaultScheduleGrace
+	if raw := setting("SCHEDULE_MISSED_GRACE"); raw != "" {
+		parsed, parseErr := time.ParseDuration(raw)
+		if parseErr != nil {
+			return Config{}, fmt.Errorf(
+				"SCHEDULE_MISSED_GRACE must be a duration such as 2m, got: %s", raw,
+			)
+		}
+		if parsed < 0 || parsed > maxScheduleGrace {
+			return Config{}, fmt.Errorf(
+				"SCHEDULE_MISSED_GRACE must be between 0 and %s, got: %s",
+				maxScheduleGrace, raw,
+			)
+		}
+		missedGrace = parsed
+	}
+
 	return Config{
 		Host: host,
 		Port: port,
@@ -141,11 +161,12 @@ func LoadConfig() (Config, error) {
 			URL:   databaseURL,
 			Token: setting("TURSO_AUTH_TOKEN"),
 		},
-		Auth:            AuthConfig{Token: authToken},
-		GatewayClientID: gatewayClientID,
-		CommandTopic:    topicPrefix + "/commands/MQTTto433",
-		SubscribedTopic: topicPrefix + "/#",
-		LogLevel:        level,
+		Auth:                AuthConfig{Token: authToken},
+		GatewayClientID:     gatewayClientID,
+		CommandTopic:        topicPrefix + "/commands/MQTTto433",
+		SubscribedTopic:     topicPrefix + "/#",
+		LogLevel:            level,
+		ScheduleMissedGrace: missedGrace,
 	}, nil
 }
 

@@ -29,6 +29,8 @@ type API struct {
 	devices          *service.DeviceService
 	commands         *service.CommandService
 	learning         *service.LearningService
+	groups           *service.GroupService
+	schedules        *service.ScheduleService
 	gateway          *service.GatewayStatusStore
 	startedAtEpochMs int64
 	now              func() int64
@@ -38,6 +40,8 @@ func NewAPI(
 	devices *service.DeviceService,
 	commands *service.CommandService,
 	learning *service.LearningService,
+	groups *service.GroupService,
+	schedules *service.ScheduleService,
 	gateway *service.GatewayStatusStore,
 ) *API {
 	now := func() int64 { return time.Now().UnixMilli() }
@@ -45,6 +49,8 @@ func NewAPI(
 		devices:          devices,
 		commands:         commands,
 		learning:         learning,
+		groups:           groups,
+		schedules:        schedules,
 		gateway:          gateway,
 		startedAtEpochMs: now(),
 		now:              now,
@@ -61,6 +67,7 @@ func NewEcho(api *API, auth config.AuthConfig) *echo.Echo {
 		AllowMethods: []string{
 			http.MethodGet,
 			http.MethodPost,
+			http.MethodPatch,
 			http.MethodDelete,
 			http.MethodOptions,
 		},
@@ -101,6 +108,19 @@ func NewEcho(api *API, auth config.AuthConfig) *echo.Echo {
 	group.PATCH("/devices/:deviceId", api.updateDevice)
 	group.POST("/devices/:deviceId/commands", api.issueCommand)
 	group.DELETE("/devices/:deviceId", api.deleteDevice)
+
+	group.GET("/groups", api.listGroups)
+	group.POST("/groups", api.createGroup)
+	group.GET("/groups/:groupId", api.getGroup)
+	group.PATCH("/groups/:groupId", api.updateGroup)
+	group.DELETE("/groups/:groupId", api.deleteGroup)
+	group.POST("/groups/:groupId/commands", api.issueGroupCommand)
+
+	group.GET("/schedules", api.listSchedules)
+	group.POST("/schedules", api.createSchedule)
+	group.GET("/schedules/:scheduleId", api.getSchedule)
+	group.PATCH("/schedules/:scheduleId", api.updateSchedule)
+	group.DELETE("/schedules/:scheduleId", api.deleteSchedule)
 
 	group.POST("/learning/sessions", api.startLearning)
 	group.GET("/learning/sessions/:sessionId", api.getLearning)
@@ -363,13 +383,9 @@ func (s *API) issueCommand(c echo.Context) error {
 	if deviceID == "" {
 		return apierror.InvalidDeviceID()
 	}
-	idempotencyKey := c.Request().Header.Get("Idempotency-Key")
-	if idempotencyKey == "" {
-		return apierror.New(
-			http.StatusBadRequest,
-			"invalid_request",
-			"Idempotency-Key is required",
-		)
+	idempotencyKey, err := requireIdempotencyKey(c)
+	if err != nil {
+		return err
 	}
 	var request contract.CommandRequest
 	if err := c.Bind(&request); err != nil {
@@ -396,6 +412,156 @@ func (s *API) deleteDevice(c echo.Context) error {
 		return err
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *API) listGroups(c echo.Context) error {
+	response, err := s.groups.List(c.Request().Context())
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, response)
+}
+
+func (s *API) createGroup(c echo.Context) error {
+	var request contract.CreateGroupRequest
+	if err := c.Bind(&request); err != nil {
+		return err
+	}
+	created, err := s.groups.Create(c.Request().Context(), request)
+	if err != nil {
+		return err
+	}
+	c.Response().Header().Set("Location", "/api/v1/groups/"+created.ID)
+	return c.JSON(http.StatusCreated, created)
+}
+
+func (s *API) getGroup(c echo.Context) error {
+	groupID := c.Param("groupId")
+	if groupID == "" {
+		return apierror.InvalidGroupID()
+	}
+	value, err := s.groups.Get(c.Request().Context(), groupID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, value)
+}
+
+func (s *API) updateGroup(c echo.Context) error {
+	groupID := c.Param("groupId")
+	if groupID == "" {
+		return apierror.InvalidGroupID()
+	}
+	var request contract.UpdateGroupRequest
+	if err := c.Bind(&request); err != nil {
+		return err
+	}
+	updated, err := s.groups.Update(c.Request().Context(), groupID, request)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, updated)
+}
+
+func (s *API) deleteGroup(c echo.Context) error {
+	groupID := c.Param("groupId")
+	if groupID == "" {
+		return apierror.InvalidGroupID()
+	}
+	if err := s.groups.Delete(c.Request().Context(), groupID); err != nil {
+		return err
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *API) issueGroupCommand(c echo.Context) error {
+	groupID := c.Param("groupId")
+	if groupID == "" {
+		return apierror.InvalidGroupID()
+	}
+	idempotencyKey, err := requireIdempotencyKey(c)
+	if err != nil {
+		return err
+	}
+	var request contract.CommandRequest
+	if err := c.Bind(&request); err != nil {
+		return err
+	}
+	result, err := s.groups.IssueCommand(
+		c.Request().Context(), groupID, request.Action, idempotencyKey,
+	)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusAccepted, result)
+}
+
+func (s *API) listSchedules(c echo.Context) error {
+	response, err := s.schedules.List(c.Request().Context())
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, response)
+}
+
+func (s *API) createSchedule(c echo.Context) error {
+	var request contract.CreateScheduleRequest
+	if err := c.Bind(&request); err != nil {
+		return err
+	}
+	created, err := s.schedules.Create(c.Request().Context(), request)
+	if err != nil {
+		return err
+	}
+	c.Response().Header().Set("Location", "/api/v1/schedules/"+created.ID)
+	return c.JSON(http.StatusCreated, created)
+}
+
+func (s *API) getSchedule(c echo.Context) error {
+	scheduleID := c.Param("scheduleId")
+	if scheduleID == "" {
+		return apierror.InvalidScheduleID()
+	}
+	value, err := s.schedules.Get(c.Request().Context(), scheduleID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, value)
+}
+
+func (s *API) updateSchedule(c echo.Context) error {
+	scheduleID := c.Param("scheduleId")
+	if scheduleID == "" {
+		return apierror.InvalidScheduleID()
+	}
+	var request contract.UpdateScheduleRequest
+	if err := c.Bind(&request); err != nil {
+		return err
+	}
+	updated, err := s.schedules.Update(c.Request().Context(), scheduleID, request)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, updated)
+}
+
+func (s *API) deleteSchedule(c echo.Context) error {
+	scheduleID := c.Param("scheduleId")
+	if scheduleID == "" {
+		return apierror.InvalidScheduleID()
+	}
+	if err := s.schedules.Delete(c.Request().Context(), scheduleID); err != nil {
+		return err
+	}
+	return c.NoContent(http.StatusNoContent)
+}
+
+func requireIdempotencyKey(c echo.Context) (string, error) {
+	key := c.Request().Header.Get("Idempotency-Key")
+	if key == "" {
+		return "", apierror.InvalidRequest("Idempotency-Key is required")
+	}
+	return key, nil
 }
 
 func (s *API) startLearning(c echo.Context) error {

@@ -38,7 +38,7 @@ func TestMigrateCreatesBaselineSchema(t *testing.T) {
 	}
 
 	for _, table := range []string{
-		"devices", "device_tombstones", "idempotency", "goose_db_version",
+		"devices", "device_tombstones", "idempotency", "groups", "device_groups", "schedules", "goose_db_version",
 	} {
 		var name string
 		err := db.QueryRow(
@@ -49,8 +49,8 @@ func TestMigrateCreatesBaselineSchema(t *testing.T) {
 			t.Fatalf("table %s not created: %v", table, err)
 		}
 	}
-	if version := gooseVersion(t, db); version != 1 {
-		t.Fatalf("version = %d, want 1", version)
+	if version := gooseVersion(t, db); version != 2 {
+		t.Fatalf("version = %d, want 2", version)
 	}
 }
 
@@ -63,8 +63,8 @@ func TestMigrateIsIdempotent(t *testing.T) {
 	if err := migrate(db); err != nil {
 		t.Fatalf("second migrate: %v", err)
 	}
-	if version := gooseVersion(t, db); version != 1 {
-		t.Fatalf("version = %d, want 1", version)
+	if version := gooseVersion(t, db); version != 2 {
+		t.Fatalf("version = %d, want 2", version)
 	}
 }
 
@@ -103,7 +103,7 @@ func TestMigrateAdoptsAutoMigrateSchema(t *testing.T) {
 	if name != "pump" {
 		t.Fatalf("name = %q, want pump", name)
 	}
-	if version := gooseVersion(t, db); version != 1 {
-		t.Fatalf("version = %d, want 1", version)
+	if version := gooseVersion(t, db); version != 2 {
+		t.Fatalf("version = %d, want 2", version)
 	}
 }

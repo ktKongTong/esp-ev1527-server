@@ -4,7 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 /** Semantic version of this shared contract module. */
-const val CONTRACT_VERSION: String = "2.2.0"
+const val CONTRACT_VERSION: String = "2.3.0"
 
 /** HTTP API version carried in [HealthResponse.apiVersion]. */
 const val API_VERSION: String = "1"
@@ -112,6 +112,124 @@ data class CommandDispatched(
     val deviceId: String,
     val action: CommandAction,
     val dispatchedAtEpochMs: Long,
+)
+
+@Serializable
+data class CommandFailure(
+    val deviceId: String,
+    val code: String,
+)
+
+/** Result of a group command fan-out. Per-device failures do not fail the batch. */
+@Serializable
+data class GroupCommandDispatched(
+    val groupId: String,
+    val action: CommandAction,
+    val dispatchedCount: Int,
+    val failedCount: Int,
+    val failures: List<CommandFailure>,
+    val dispatchedAtEpochMs: Long,
+)
+
+/**
+ * A named set of devices. Membership is many-to-many: one device can belong to
+ * several groups, and a group can contain any number of devices.
+ */
+@Serializable
+data class Group(
+    val id: String,
+    val name: String,
+    val deviceIds: List<String>,
+    val createdAtEpochMs: Long,
+    val updatedAtEpochMs: Long,
+)
+
+@Serializable
+data class GroupListResponse(
+    val groups: List<Group>,
+    val serverTimeEpochMs: Long,
+)
+
+@Serializable
+data class CreateGroupRequest(
+    val name: String,
+    val deviceIds: List<String>,
+)
+
+/** A null field stays unchanged; a present deviceIds replaces the full set. */
+@Serializable
+data class UpdateGroupRequest(
+    val name: String? = null,
+    val deviceIds: List<String>? = null,
+)
+
+@Serializable
+enum class ScheduleTarget {
+    @SerialName("device") DEVICE,
+    @SerialName("group") GROUP,
+}
+
+@Serializable
+enum class ScheduleResult {
+    @SerialName("dispatched") DISPATCHED,
+    @SerialName("partial") PARTIAL,
+    @SerialName("skipped") SKIPPED,
+    @SerialName("failed") FAILED,
+}
+
+/**
+ * An alarm-like schedule. Recurrence is an RFC 5545 RRULE interpreted in
+ * [timeZone]; [startsAtEpochMs] is DTSTART. The rule is not limited to a fixed
+ * once/daily/weekly set.
+ */
+@Serializable
+data class Schedule(
+    val id: String,
+    val name: String,
+    val targetType: ScheduleTarget,
+    val targetId: String,
+    val action: CommandAction,
+    val rrule: String,
+    val timeZone: String,
+    val startsAtEpochMs: Long,
+    val enabled: Boolean,
+    val nextRunAtEpochMs: Long? = null,
+    val lastRunAtEpochMs: Long? = null,
+    val lastResult: ScheduleResult? = null,
+    val lastError: String? = null,
+    val createdAtEpochMs: Long,
+    val updatedAtEpochMs: Long,
+)
+
+@Serializable
+data class ScheduleListResponse(
+    val schedules: List<Schedule>,
+    val serverTimeEpochMs: Long,
+)
+
+@Serializable
+data class CreateScheduleRequest(
+    val name: String = "",
+    val targetType: ScheduleTarget,
+    val targetId: String,
+    val action: CommandAction,
+    val rrule: String,
+    val timeZone: String,
+    val startsAtEpochMs: Long,
+    val enabled: Boolean? = null,
+)
+
+/** A null field stays unchanged. */
+@Serializable
+data class UpdateScheduleRequest(
+    val name: String? = null,
+    val targetType: ScheduleTarget? = null,
+    val targetId: String? = null,
+    val action: CommandAction? = null,
+    val rrule: String? = null,
+    val timeZone: String? = null,
+    val startsAtEpochMs: Long? = null,
+    val enabled: Boolean? = null,
 )
 
 @Serializable

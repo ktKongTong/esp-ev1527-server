@@ -13,10 +13,12 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items as listItems
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -47,9 +49,18 @@ import com.esp32.control.gui.ui.DeviceDetailSheet
 import com.esp32.control.gui.ui.DeviceEditDialog
 import com.esp32.control.gui.ui.DeviceHeader
 import com.esp32.control.gui.ui.EmptyDevices
+import com.esp32.control.gui.ui.EmptyGroups
+import com.esp32.control.gui.ui.EmptySchedules
 import com.esp32.control.gui.ui.ErrorBanner
+import com.esp32.control.gui.ui.GroupCard
+import com.esp32.control.gui.ui.GroupEditorDialog
+import com.esp32.control.gui.ui.GroupHeader
 import com.esp32.control.gui.ui.LearningSheet
 import com.esp32.control.gui.ui.LoadingDevices
+import com.esp32.control.gui.ui.NoticeBanner
+import com.esp32.control.gui.ui.ScheduleCard
+import com.esp32.control.gui.ui.ScheduleEditorDialog
+import com.esp32.control.gui.ui.ScheduleHeader
 import com.esp32.control.gui.ui.SettingsScreen
 
 @Composable
@@ -185,6 +196,117 @@ private fun AppContent(
                                 }
                             }
 
+                            BottomTab.Groups -> LazyColumn(
+                                modifier = Modifier
+                                    .widthIn(max = 1120.dp)
+                                    .fillMaxSize(),
+                                contentPadding = PaddingValues(
+                                    start = horizontalPadding,
+                                    end = horizontalPadding,
+                                    top = 8.dp,
+                                    bottom = 140.dp,
+                                ),
+                                verticalArrangement = Arrangement.spacedBy(14.dp),
+                            ) {
+                                item { GroupHeader(health = state.health) }
+
+                                state.error?.let { message ->
+                                    item {
+                                        ErrorBanner(
+                                            message = message,
+                                            onDismiss = viewModel::dismissError,
+                                        )
+                                    }
+                                }
+
+                                state.groupNotice?.let { notice ->
+                                    item {
+                                        NoticeBanner(
+                                            message = notice,
+                                            onDismiss = viewModel::dismissGroupNotice,
+                                        )
+                                    }
+                                }
+
+                                when {
+                                    state.groups.isEmpty() && state.loading -> item {
+                                        LoadingDevices("正在同步分组…")
+                                    }
+
+                                    state.groups.isEmpty() -> item {
+                                        EmptyGroups(
+                                            onCreate = { viewModel.openGroupEditor() },
+                                        )
+                                    }
+
+                                    else -> listItems(state.groups, key = { it.id }) { group ->
+                                        GroupCard(
+                                            group = group,
+                                            devices = state.devices,
+                                            pending = state.pendingGroupId == group.id,
+                                            gatewayOnline = state.gatewayOnline,
+                                            onCommand = { action ->
+                                                viewModel.sendGroupCommand(group.id, action)
+                                            },
+                                            onEdit = { viewModel.openGroupEditor(group.id) },
+                                            onRemove = { viewModel.requestGroupRemoval(group.id) },
+                                        )
+                                    }
+                                }
+                            }
+
+                            BottomTab.Schedules -> LazyColumn(
+                                modifier = Modifier
+                                    .widthIn(max = 1120.dp)
+                                    .fillMaxSize(),
+                                contentPadding = PaddingValues(
+                                    start = horizontalPadding,
+                                    end = horizontalPadding,
+                                    top = 8.dp,
+                                    bottom = 140.dp,
+                                ),
+                                verticalArrangement = Arrangement.spacedBy(14.dp),
+                            ) {
+                                item { ScheduleHeader(health = state.health) }
+
+                                state.error?.let { message ->
+                                    item {
+                                        ErrorBanner(
+                                            message = message,
+                                            onDismiss = viewModel::dismissError,
+                                        )
+                                    }
+                                }
+
+                                when {
+                                    state.schedules.isEmpty() && state.loading -> item {
+                                        LoadingDevices("正在同步定时…")
+                                    }
+
+                                    state.schedules.isEmpty() -> item {
+                                        EmptySchedules(
+                                            onCreate = { viewModel.openScheduleEditor() },
+                                        )
+                                    }
+
+                                    else -> listItems(state.schedules, key = { it.id }) { schedule ->
+                                        ScheduleCard(
+                                            schedule = schedule,
+                                            devices = state.devices,
+                                            groups = state.groups,
+                                            pending = state.pendingScheduleId == schedule.id,
+                                            onToggle = { enabled ->
+                                                viewModel.setScheduleEnabled(schedule.id, enabled)
+                                            },
+                                            onEdit = { viewModel.openScheduleEditor(schedule.id) },
+                                            onRemove = {
+                                                viewModel.requestScheduleRemoval(schedule.id)
+                                            },
+                                        )
+                                    }
+                                }
+                            }
+
                             BottomTab.Settings -> SettingsScreen(
                                 serverUrl = state.serverUrl.orEmpty(),
                                 apiToken = state.apiToken,
@@ -208,7 +330,20 @@ private fun AppContent(
                 BottomChrome(
                     selected = state.selectedTab,
                     onSelect = viewModel::selectTab,
-                    onLearn = viewModel::openLearning,
+                    onAdd = {
+                        when (state.selectedTab) {
+                            BottomTab.Devices -> viewModel.openLearning()
+                            BottomTab.Groups -> viewModel.openGroupEditor()
+                            BottomTab.Schedules -> viewModel.openScheduleEditor()
+                            BottomTab.Settings -> Unit
+                        }
+                    },
+                    addDescription = when (state.selectedTab) {
+                        BottomTab.Devices -> "学习新设备"
+                        BottomTab.Groups -> "创建分组"
+                        BottomTab.Schedules -> "创建定时"
+                        BottomTab.Settings -> "设置"
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -298,6 +433,129 @@ private fun AppContent(
             },
             dismissButton = {
                 TextButton(onClick = viewModel::dismissRemoval) {
+                    Text("取消")
+                }
+            },
+        )
+    }
+
+    if (state.groupEditorVisible) {
+        GroupEditorDialog(
+            group = state.groupEditorTarget,
+            devices = state.devices,
+            busy = state.groupBusy,
+            errorText = state.groupError,
+            onSave = { name, deviceIds ->
+                viewModel.saveGroup(state.groupEditorTarget?.id, name, deviceIds)
+            },
+            onDismiss = viewModel::closeGroupEditor,
+        )
+    }
+
+    if (state.scheduleEditorVisible) {
+        ScheduleEditorDialog(
+            schedule = state.scheduleEditorTarget,
+            devices = state.devices,
+            groups = state.groups,
+            busy = state.scheduleBusy,
+            errorText = state.scheduleError,
+            onSave = { name, targetType, targetId, action, rrule, timeZone, startsAt, enabled ->
+                viewModel.saveSchedule(
+                    scheduleId = state.scheduleEditorTarget?.id,
+                    name = name,
+                    targetType = targetType,
+                    targetId = targetId,
+                    action = action,
+                    rrule = rrule,
+                    timeZone = timeZone,
+                    startsAtEpochMs = startsAt,
+                    enabled = enabled,
+                )
+            },
+            onDismiss = viewModel::closeScheduleEditor,
+        )
+    }
+
+    state.groupRemovalTarget?.let { group ->
+        AlertDialog(
+            onDismissRequest = viewModel::dismissGroupRemoval,
+            shape = AppShapes.Dialog,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            icon = {
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.size(48.dp),
+                ) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        DeleteIcon(Modifier.size(22.dp))
+                    }
+                }
+            },
+            title = { Text("删除分组？") },
+            text = {
+                Text(
+                    "将删除“${group.name}”。指向该分组的定时任务会一并删除；设备本身不受影响。",
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.removeGroup(group.id) },
+                    shape = CircleShape,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) {
+                    Text("删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissGroupRemoval) {
+                    Text("取消")
+                }
+            },
+        )
+    }
+
+    state.scheduleRemovalTarget?.let { schedule ->
+        AlertDialog(
+            onDismissRequest = viewModel::dismissScheduleRemoval,
+            shape = AppShapes.Dialog,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            icon = {
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.size(48.dp),
+                ) {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        DeleteIcon(Modifier.size(22.dp))
+                    }
+                }
+            },
+            title = { Text("删除定时？") },
+            text = {
+                Text(
+                    "将删除“${schedule.name.ifBlank { "未命名定时" }}”。此操作不会向网关发送任何 RF 指令。",
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = { viewModel.removeSchedule(schedule.id) },
+                    shape = CircleShape,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) {
+                    Text("删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissScheduleRemoval) {
                     Text("取消")
                 }
             },

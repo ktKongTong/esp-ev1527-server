@@ -50,6 +50,7 @@ kotlin {
 
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)
+            implementation(libs.kotlinx.datetime)
             // DataStore Preferences is KMP (Android, JVM, native, wasmJs).
             implementation(libs.androidx.datastore.preferences.core)
             implementation(libs.androidx.lifecycle.viewmodel.compose)

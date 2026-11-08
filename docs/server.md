@@ -6,12 +6,16 @@ server 作为客户端和网关沟通的中间节点，需要完成以下内容�
 
 1. 负责与 MQTT server 通信，维护网关状态与系统状态。
 2. 基本设备的生命周期管理：新增、删除、控制、编辑。
+3. 设备分组：一个设备可同时属于多个分组，向分组下发时逐设备发布。
+4. 定时任务：按 RFC 5545 RRULE + IANA 时区在服务端触发控制，支持设备或分组目标。
 
 ## 技术栈
 
 1. 持久化使用 Turso Cloud（SQLite 兼容），ORM 使用 GORM。
 2. MQTT 客户端使用 `eclipse/paho.mqtt.golang`。
 3. HTTP 使用 Echo。
+4. 定时器使用 `github.com/go-co-op/gocron/v2` 的一次性任务；重复规则解析使用
+   `github.com/teambition/rrule-go`。
 
 ## 实现状态
 
@@ -26,8 +30,21 @@ server 作为客户端和网关沟通的中间节点，需要完成以下内容�
   未执行的版本；已应用版本记录在 `goose_db_version` 表。不使用 GORM
   `AutoMigrate`。`00001_baseline.sql` 用 `CREATE TABLE IF NOT EXISTS` 兼容
   旧 `AutoMigrate` 创建的数据库，升级时只记录版本，不改动已有数据。
-- 表：`devices`、`device_tombstones`、`idempotency`，以及迁移版本表
-  `goose_db_version`。业务列名保持 camelCase，与上一版服务端的表结构兼容。
+- 表：`devices`、`device_tombstones`、`idempotency`、`groups`、
+  `device_groups`、`schedules`，以及迁移版本表 `goose_db_version`。
+  业务列名保持 camelCase，与上一版服务端的表结构兼容。分组与定时由
+  `00002_groups_and_schedules.sql` 引入；`device_groups` 是多对多成员关系。
+- 分组：`GroupService` 负责成员校验与 fan-out。下发时复用
+  `CommandService.IssueBatch`：客户端每批一个 `Idempotency-Key`，服务端按
+  `key|deviceId` 派生每台设备的去重 key，重试整批时逐设备命中缓存。
+- 定时：`ScheduleService` 保存 `rrule` / `timeZone` / `startsAtEpochMs`(DTSTART)
+  与物化的 `nextRunAtEpochMs`。`internal/scheduler` 是 gocron 的薄适配层，
+  只注册一次性任务并回调 `ScheduleService.Fire`；不用 cron 表达式，也不自建
+  ticker。`Fire` 会重新校验预期触发时间，过期的定时器不会提前下发。
+- 错过触发：服务启动时，`nextRunAtEpochMs` 在 `SCHEDULE_MISSED_GRACE`
+  （默认 `2m`，上限 `1h`）内只补发一次；更早的错过直接跳过并从当前时间重算，
+  避免长时间停机后突发下发。补发不跨重启去重，但同一 occurrence 的幂等 key
+  固定，重试不会重复发射。
 - MQTT：paho 提供 MQTT 3.1.1、QoS 1、keepalive 与自动重连。MQTT 是必需配置：
   未设置 `MQTT_HOST` 时启动失败，没有本地降级模式。
 - 配置只读取工作目录中的 `.env`（存在则加载，缺失则跳过），环境变量优先；
@@ -43,8 +60,9 @@ server 作为客户端和网关沟通的中间节点，需要完成以下内容�
   按 Broker 的 WSS 监听器配置（EMQX Cloud 为 8084 + `/mqtt`）。
   `MQTT_TLS=true` 不能与 `MQTT_TRANSPORT=tcp` 组合，启动时直接报错。
 - 结构：`main.go` 为组合根；HTTP 在 `http.go`，领域逻辑在 `devices.go` /
-  `commands.go` / `learning.go`，持久化在 `repositories.go` + `store.go`，
-  迁移在 `migrate.go` + `migrations/`，MQTT 在 `mqtt.go` / `gateway.go`。
+  `commands.go` / `learning.go` / `groups.go` / `schedules.go`，持久化在
+  `repositories.go` + `store.go`，迁移在 `migrate.go` + `migrations/`，
+  MQTT 在 `mqtt.go` / `gateway.go`，定时器适配在 `internal/scheduler/`。
 - 状态同步：v1.2.0 不提供 SSE；客户端轮询快照。
 
 接口、状态机与数据流的完整定义见
@@ -58,6 +76,9 @@ server 作为客户端和网关沟通的中间节点，需要完成以下内容�
   得到 `404 learning_session_not_found`，需要重新开始；已确认的设备不受影响。
 - 幂等记录在发布前预留；发布成功后写入 `dispatchedAtEpochMs`，发布失败则删除，
   允许客户端重试。重启不重发任何命令。
+- 定时任务定义持久化在 `schedules`，进程内计时器不持久化。启动时按
+  `enabled=1` 且 `nextRunAtEpochMs` 非空的行重建计时器；`nextRunAtEpochMs`
+  是物化值，重启不需要重新展开整条 RRULE 历史。
 
 ## 历史
 

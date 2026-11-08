@@ -99,6 +99,75 @@ class ContractSerializationTest {
     }
 
     @Test
+    fun groupWireShapeDecodesMembers() {
+        val wire = """
+            {
+              "id": "grp_1",
+              "name": "1 号塘",
+              "deviceIds": ["dev_1", "dev_2"],
+              "createdAtEpochMs": 1730000000000,
+              "updatedAtEpochMs": 1730000000001
+            }
+        """.trimIndent()
+
+        val group = ContractJson.decodeFromString<Group>(wire)
+
+        assertEquals("1 号塘", group.name)
+        assertEquals(listOf("dev_1", "dev_2"), group.deviceIds)
+
+        val request = ContractJson.encodeToString(
+            CreateGroupRequest(name = "1 号塘", deviceIds = listOf("dev_1")),
+        )
+        assertTrue(request.contains("\"deviceIds\":[\"dev_1\"]"), request)
+    }
+
+    @Test
+    fun scheduleWireShapeDecodesRecurrence() {
+        val wire = """
+            {
+              "id": "sch_1",
+              "name": "morning",
+              "targetType": "group",
+              "targetId": "grp_1",
+              "action": "turn_on",
+              "rrule": "FREQ=DAILY",
+              "timeZone": "Asia/Shanghai",
+              "startsAtEpochMs": 1730000000000,
+              "enabled": true,
+              "nextRunAtEpochMs": 1730003600000,
+              "lastRunAtEpochMs": null,
+              "lastResult": "dispatched",
+              "lastError": null,
+              "createdAtEpochMs": 1730000000000,
+              "updatedAtEpochMs": 1730000000001
+            }
+        """.trimIndent()
+
+        val schedule = ContractJson.decodeFromString<Schedule>(wire)
+
+        assertEquals(ScheduleTarget.GROUP, schedule.targetType)
+        assertEquals(CommandAction.TURN_ON, schedule.action)
+        assertEquals(ScheduleResult.DISPATCHED, schedule.lastResult)
+        assertEquals("FREQ=DAILY", schedule.rrule)
+        assertEquals(null, schedule.lastRunAtEpochMs)
+    }
+
+    @Test
+    fun updateScheduleRequestKeepsOmittedFieldsNull() {
+        val request = ContractJson.decodeFromString<UpdateScheduleRequest>(
+            """{"enabled":false}""",
+        )
+
+        assertEquals(false, request.enabled)
+        assertEquals(null, request.rrule)
+        assertEquals(null, request.startsAtEpochMs)
+
+        val encoded = ContractJson.encodeToString(UpdateScheduleRequest(enabled = false))
+        assertTrue(encoded.contains("\"enabled\":false"), encoded)
+        assertTrue(encoded.contains("\"rrule\":null"), encoded)
+    }
+
+    @Test
     fun errorEnvelopeRoundTrips() {
         val wire = """
             {

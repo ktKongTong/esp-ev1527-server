@@ -47,6 +47,63 @@ type idempotencyRow struct {
 
 func (idempotencyRow) TableName() string { return "idempotency" }
 
+type groupRow struct {
+	ID               string `gorm:"column:id;primaryKey"`
+	Name             string `gorm:"column:name"`
+	CreatedAtEpochMs int64  `gorm:"column:createdAtEpochMs"`
+	UpdatedAtEpochMs int64  `gorm:"column:updatedAtEpochMs"`
+}
+
+func (groupRow) TableName() string { return "groups" }
+
+type deviceGroupRow struct {
+	DeviceID       string `gorm:"column:deviceId;primaryKey"`
+	GroupID        string `gorm:"column:groupId;primaryKey"`
+	AddedAtEpochMs int64  `gorm:"column:addedAtEpochMs"`
+}
+
+func (deviceGroupRow) TableName() string { return "device_groups" }
+
+type scheduleRow struct {
+	ID               string  `gorm:"column:id;primaryKey"`
+	Name             string  `gorm:"column:name"`
+	TargetType       string  `gorm:"column:targetType"`
+	TargetID         string  `gorm:"column:targetId"`
+	Action           string  `gorm:"column:action"`
+	RRule            string  `gorm:"column:rrule"`
+	TimeZone         string  `gorm:"column:timeZone"`
+	StartsAtEpochMs  int64   `gorm:"column:startsAtEpochMs"`
+	Enabled          bool    `gorm:"column:enabled"`
+	NextRunAtEpochMs *int64  `gorm:"column:nextRunAtEpochMs"`
+	LastRunAtEpochMs *int64  `gorm:"column:lastRunAtEpochMs"`
+	LastResult       *string `gorm:"column:lastResult"`
+	LastError        *string `gorm:"column:lastError"`
+	CreatedAtEpochMs int64   `gorm:"column:createdAtEpochMs"`
+	UpdatedAtEpochMs int64   `gorm:"column:updatedAtEpochMs"`
+}
+
+func (scheduleRow) TableName() string { return "schedules" }
+
+func (row scheduleRow) toSchedule() contract.Schedule {
+	return contract.Schedule{
+		ID:               row.ID,
+		Name:             row.Name,
+		TargetType:       row.TargetType,
+		TargetID:         row.TargetID,
+		Action:           row.Action,
+		RRule:            row.RRule,
+		TimeZone:         row.TimeZone,
+		StartsAtEpochMs:  row.StartsAtEpochMs,
+		Enabled:          row.Enabled,
+		NextRunAtEpochMs: row.NextRunAtEpochMs,
+		LastRunAtEpochMs: row.LastRunAtEpochMs,
+		LastResult:       row.LastResult,
+		LastError:        row.LastError,
+		CreatedAtEpochMs: row.CreatedAtEpochMs,
+		UpdatedAtEpochMs: row.UpdatedAtEpochMs,
+	}
+}
+
 // Open connects GORM to Turso and applies the versioned migrations. The GORM
 // sqlite dialector supplies the SQLite SQL; it runs on the connection provided
 // by the pure-Go Turso serverless driver instead of opening a local database

@@ -331,3 +331,64 @@ HTTP 契约、MQTT 协议、状态机与表结构不变。
 - `gofmt -l .` 无输出，`go vet ./...` 通过，`CGO_ENABLED=1 go test ./...`：
   84 个测试通过（`:memory:`，不访问 Turso）。
 - 未执行：真实 Turso Cloud 上的迁移、并发多实例启动。
+
+## 10. 2026-11-08 分组与定时
+
+需求要求“设备可归属多个分组”和“像闹钟一样、不局限于一次/每天/每周的定时”。
+分组本身是关系表；定时需要 RFC 5545 重复规则与真实时区，并需要进程内定时器。
+
+### 10.1 复用
+
+| 能力 | 复用 | 说明 |
+| --- | --- | --- |
+| 命令发布 | `CommandService.IssueBatch` | 分组下发与定时触发复用同一批量路径：网关在线检查、逐设备幂等 key、逐设备错误 |
+| 幂等 | `internal/repository` 的 `idempotency` 表 | 定时以 `scheduleId|nextRunAtEpochMs` 为 seed，复用现有去重与 TTL；不新增第二套幂等 |
+| 设备/分组校验 | `DeviceService.Find`、`GroupService.Find`、`requireDeviceID` / `requireGroupID` | 定时目标与分组成员的校验复用现有规则与错误码 |
+| 迁移 | goose + `migrations/` | 新增 `00002_groups_and_schedules.sql`，不修改 `00001_baseline.sql` |
+| 配置 | Koanf 加载器 | `SCHEDULE_MISSED_GRACE` 走现有 duration 解析与边界校验 |
+| 时间 | `service.WithNow` 固定时钟 | 定时测试与现有服务测试共用同一注入点 |
+| 客户端 HTTP | `Esp32Api` + `ContractJson` | 分组/定时复用现有客户端、错误信封与序列化配置 |
+| 客户端时间 | kotlinx-datetime 0.8.0 | 定时页直接使用 `TimeZone`/`Instant`/`LocalDateTime.Format`；时区与 DST 由平台 `java.time`/`Intl` 提供，不打包 zoneinfo，不保留自定义时间工具层 |
+
+### 10.2 新增依赖
+
+| 依赖 | 版本 | 用途 | 验收 |
+| --- | --- | --- | --- |
+| `github.com/go-co-op/gocron/v2` | v2.23.0 | 进程内一次性任务调度 | 维护活跃；只注册 `OneTimeJob`，不用 cron 表达式；通过 `internal/scheduler` 薄适配，核心服务不直接依赖 gocron |
+| `github.com/teambition/rrule-go` | v1.8.2 | RFC 5545 RRULE 解析与 occurrence 计算 | 纯 Go、无 CGO；支持 IANA 时区；本仓库只用 `StrToROptionInLocation` + `After` |
+| `github.com/google/uuid` | v1.6.0 | gocron 任务 ID 类型 | gocron 的 API 要求；仅调度器适配层使用 |
+| `org.jetbrains.kotlinx:kotlinx-datetime` | 0.8.0 | 客户端系统时区、当前时间、本地墙钟与 epoch 转换 | Kotlin 官方库，支持 Android 与 wasmJs；时区数据来自平台，不增加 Wasm 包体积；替换原先两套 `expect/actual` 实现与自定义 `LocalDateTime` 工具层 |
+
+间接依赖 `jonboulle/clockwork`、`robfig/cron/v3` 由 gocron 引入，纯 Go。
+
+### 10.3 未采用
+
+| 方案 | 原因 |
+| --- | --- |
+| 自建 500 ms ticker 轮询 `nextRunAt` | 需要自己处理唤醒精度、并发、重入与关闭；gocron 已覆盖一次性任务生命周期 |
+| cron 表达式 | 不能表达“每月最后一天”“COUNT=1”“工作日”等闹钟语义，且没有 DTSTART 概念 |
+| 仅存 `once/daily/weekly` 枚举 | 用户明确要求不被固定枚举限制；枚举会迫使每次扩展都改协议 |
+| 客户端计算触发时间 | 客户端时区/时钟不可信，进程不在前台时无法触发；服务端是唯一调度者 |
+| 客户端自研时间层（`expect/actual` 或自定义 `LocalDateTime` 封装） | 需要维护 Android `java.time` 与 Wasm `Intl`/`Date` 两套实现及各自的格式化/解析边界；kotlinx-datetime 已封装这些平台差异，且不打包 zoneinfo |
+| 定时命令排队/重试 | 315MHz 单向链路没有回执；过期触发补发会造成突发 RF。宽限窗口外直接跳过 |
+| 为定时新增命令历史表 | 违背“控制不保存命令历史”的既有决策；只保留最近一次执行结果 |
+
+### 10.4 自研范围
+
+- `GroupService`：成员校验、成员替换、fan-out 结果聚合、级联删除。
+- `ScheduleService`：RRULE 归一化、DTSTART/时区处理、`nextRunAt` 计算与持久化、
+  重启恢复与错过宽限、触发去重。
+- `internal/scheduler`：gocron 的 `Register` / `Unregister` / `Shutdown` 适配，
+  任务 ID 映射与 panic 隔离。
+- 以上均为产品领域逻辑（分组/闹钟语义），外部库不提供。
+
+### 10.5 验证
+
+- `CGO_ENABLED=1 go test ./...`：113 个测试通过（11 个包，`:memory:`）。
+- `mock`：21 个测试通过。
+- Kotlin：`:contract:testAndroidHostTest`、`:shared:compileKotlinWasmJs`、
+  `:androidApp:assembleDebug`、`:webApp:wasmJsBrowserDistribution` 通过
+  （客户端时间改用 kotlinx-datetime 0.8.0 后重新执行）。
+- 未执行：真实网关下的定时 RF 发射、跨时区 DST 切换的端到端验证、真实 Turso Cloud。
+- 客户端时间转换暂无单元测试：`shared` 没有测试源集，本次未为几个纯转换函数
+  新增测试基础设施。

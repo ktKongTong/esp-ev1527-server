@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"time"
 )
 
 type MQTTTransport string
@@ -75,13 +76,14 @@ func (c DatabaseConfig) String() string {
 }
 
 type Config struct {
-	Host            string
-	Port            int
-	MQTT            MQTTConfig
-	Database        DatabaseConfig
-	Auth            AuthConfig
-	GatewayClientID string
-	CommandTopic    string
-	SubscribedTopic string
-	LogLevel        slog.Level
+	Host                string
+	Port                int
+	MQTT                MQTTConfig
+	Database            DatabaseConfig
+	Auth                AuthConfig
+	GatewayClientID     string
+	CommandTopic        string
+	SubscribedTopic     string
+	LogLevel            slog.Level
+	ScheduleMissedGrace time.Duration
 }

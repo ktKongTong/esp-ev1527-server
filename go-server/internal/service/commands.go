@@ -2,6 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"unicode/utf8"
@@ -209,6 +212,71 @@ func (s *CommandService) Issue(
 		Action:              action,
 		DispatchedAtEpochMs: dispatchedAt,
 	}, false, nil
+}
+
+// BatchDispatch reports the per-device outcome of one fan-out request. A
+// failure on one device does not abort the rest of the batch.
+type BatchDispatch struct {
+	Dispatched []contract.CommandDispatched
+	Failures   []contract.CommandFailure
+}
+
+// IssueBatch sends the same action to several devices. The caller supplies a
+// stable seed; each device gets a deterministic key derived from the seed and
+// its id, so retrying the same fan-out replays instead of transmitting twice.
+func (s *CommandService) IssueBatch(
+	ctx context.Context,
+	deviceIDs []string,
+	action, keySeed string,
+) (BatchDispatch, error) {
+	if action != contract.ActionTurnOn && action != contract.ActionTurnOff {
+		return BatchDispatch{}, apierror.InvalidRequest(
+			"action must be turn_on or turn_off",
+		)
+	}
+	if count := utf8.RuneCountInString(keySeed); count < 1 || count > 64 {
+		return BatchDispatch{}, apierror.InvalidRequest(
+			"Idempotency-Key must be 1-64 characters",
+		)
+	}
+	if !s.gateway.IsOnline() {
+		return BatchDispatch{}, apierror.Unavailable(
+			"gateway_unavailable",
+			"Gateway is not online",
+		)
+	}
+
+	result := BatchDispatch{
+		Dispatched: make([]contract.CommandDispatched, 0, len(deviceIDs)),
+		Failures:   make([]contract.CommandFailure, 0),
+	}
+	for _, deviceID := range deviceIDs {
+		dispatched, _, err := s.Issue(
+			ctx, deviceID, action, batchIdempotencyKey(keySeed, deviceID),
+		)
+		if err != nil {
+			result.Failures = append(result.Failures, contract.CommandFailure{
+				DeviceID: deviceID,
+				Code:     errorCode(err),
+			})
+			continue
+		}
+		result.Dispatched = append(result.Dispatched, dispatched)
+	}
+	return result, nil
+}
+
+func batchIdempotencyKey(seed, deviceID string) string {
+	sum := sha256.Sum256([]byte(seed + "|" + deviceID))
+	return "b_" + hex.EncodeToString(sum[:])[:48]
+}
+
+func errorCode(err error) string {
+	var apiErr *apierror.Error
+	if errors.As(err, &apiErr) {
+		return apiErr.Code
+	}
+	return "internal_error"
 }
 
 func (s *CommandService) Purge(now int64) error {

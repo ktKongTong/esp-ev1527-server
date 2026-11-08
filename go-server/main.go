@@ -6,15 +6,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"syscall"
 	"time"
+	_ "time/tzdata"
 
 	"esp32controlserver/internal/config"
 	"esp32controlserver/internal/contract"
 	"esp32controlserver/internal/logging"
 	"esp32controlserver/internal/mqtt"
 	"esp32controlserver/internal/repository"
+	"esp32controlserver/internal/scheduler"
 	"esp32controlserver/internal/server"
 	"esp32controlserver/internal/service"
 )
@@ -33,8 +34,9 @@ func main() {
 	logging.Infof("%s", cfg.MQTT)
 	logging.Infof("%s", cfg.Auth)
 	logging.Infof(
-		"http=%s database=%s subscribe=%s command=%s",
+		"http=%s database=%s subscribe=%s command=%s scheduleGrace=%s",
 		cfg.Host, cfg.Database, cfg.SubscribedTopic, cfg.CommandTopic,
+		cfg.ScheduleMissedGrace,
 	)
 
 	db, err := repository.Open(cfg.Database.URL, cfg.Database.Token)
@@ -44,6 +46,8 @@ func main() {
 	}
 
 	devices := repository.NewDeviceRepository(db)
+	groups := repository.NewGroupRepository(db)
+	schedules := repository.NewScheduleRepository(db)
 	idempotency := repository.NewIdempotencyRepository(db)
 	gateway := service.NewGatewayStatusStore(cfg.GatewayClientID)
 
@@ -71,13 +75,73 @@ func main() {
 		db, devices, idempotency, gateway, transmitter,
 	)
 	deviceService := service.NewDeviceService(db, devices)
+	groupService := service.NewGroupService(
+		db, groups, devices, commandService, gateway,
+	)
 	learningService := service.NewLearningService(db, devices, gateway, transmitter)
 	ingest = service.NewGatewayIngest(cfg.MQTT.TopicPrefix, gateway, learningService)
 
-	api := server.NewAPI(deviceService, commandService, learningService, gateway)
-	httpServer := server.NewEcho(api, cfg.Auth)
+	// The scheduler callback needs the schedule service, which itself needs
+	// the registrar. The holder resolves that small cycle before Start.
+	var scheduleService *service.ScheduleService
+	runner, err := scheduler.New(
+		func(ctx context.Context, scheduleID string, expectedNextRunAtEpochMs int64) {
+			if scheduleService != nil {
+				scheduleService.Fire(ctx, scheduleID, expectedNextRunAtEpochMs)
+			}
+		},
+		cfg.ScheduleMissedGrace,
+	)
+	if err != nil {
+		logging.Errorf("scheduler error: %v", err)
+		os.Exit(1)
+	}
+	scheduleService = service.NewScheduleService(
+		db, schedules, devices, groups, commandService, gateway,
+		runner, cfg.ScheduleMissedGrace,
+	)
 
-	go runBackgroundTasks(learningService, commandService, deviceService)
+	if err := scheduleService.Start(context.Background()); err != nil {
+		logging.Errorf("restore schedules: %v", err)
+		os.Exit(1)
+	}
+	maintenance := []struct {
+		interval time.Duration
+		name     string
+		task     func()
+	}{
+		{500 * time.Millisecond, "learning-tick", learningService.Tick},
+		{time.Minute, "idempotency-purge", func() {
+			if err := commandService.Purge(time.Now().UnixMilli()); err != nil {
+				logging.Errorf("maintenance idempotency-purge: %v", err)
+			}
+		}},
+		{time.Hour, "tombstone-purge", func() {
+			if err := deviceService.Purge(time.Now().UnixMilli()); err != nil {
+				logging.Errorf("maintenance tombstone-purge: %v", err)
+			}
+		}},
+	}
+	for _, job := range maintenance {
+		if err := runner.Every(job.interval, job.name, job.task); err != nil {
+			logging.Errorf("scheduler error: %v", err)
+			os.Exit(1)
+		}
+	}
+	runner.Start()
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := runner.Shutdown(shutdownContext); err != nil {
+			logging.Errorf("scheduler shutdown failed: %v", err)
+		}
+	}()
+
+	api := server.NewAPI(
+		deviceService, commandService, learningService, groupService,
+		scheduleService, gateway,
+	)
+	httpServer := server.NewEcho(api, cfg.Auth)
 
 	transport.Start()
 	logging.Infof("HTTP server starting on %s", server.ListenAddress(cfg))
@@ -103,31 +167,5 @@ func main() {
 		if err := httpServer.Shutdown(shutdownContext); err != nil {
 			logging.Errorf("HTTP shutdown failed: %v", err)
 		}
-	}
-}
-
-func runBackgroundTasks(
-	learning *service.LearningService,
-	commands *service.CommandService,
-	devices *service.DeviceService,
-) {
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	for range ticker.C {
-		func() {
-			defer func() {
-				if recovered := recover(); recovered != nil {
-					logging.Errorf("background task panic: %v\n%s", recovered, debug.Stack())
-				}
-			}()
-			now := time.Now().UnixMilli()
-			learning.Tick()
-			if err := commands.Purge(now); err != nil {
-				logging.Errorf("background task failed: idempotency purge: %v", err)
-			}
-			if err := devices.Purge(now); err != nil {
-				logging.Errorf("background task failed: tombstone purge: %v", err)
-			}
-		}()
 	}
 }

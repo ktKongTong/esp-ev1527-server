@@ -5,16 +5,25 @@ import com.esp32.control.contract.CommandAction
 import com.esp32.control.contract.CommandRequest
 import com.esp32.control.contract.ConfirmLearningRequest
 import com.esp32.control.contract.ContractJson
+import com.esp32.control.contract.CreateGroupRequest
+import com.esp32.control.contract.CreateScheduleRequest
 import com.esp32.control.contract.Device
 import com.esp32.control.contract.DeviceListResponse
+import com.esp32.control.contract.Group
+import com.esp32.control.contract.GroupCommandDispatched
+import com.esp32.control.contract.GroupListResponse
 import com.esp32.control.contract.HealthResponse
 import com.esp32.control.contract.LearningConfirmation
 import com.esp32.control.contract.LearningSession
 import com.esp32.control.contract.LearningSlot
 import com.esp32.control.contract.LearningTestResult
+import com.esp32.control.contract.Schedule
+import com.esp32.control.contract.ScheduleListResponse
 import com.esp32.control.contract.StartLearningRequest
 import com.esp32.control.contract.TestLearningRequest
 import com.esp32.control.contract.UpdateDeviceRequest
+import com.esp32.control.contract.UpdateGroupRequest
+import com.esp32.control.contract.UpdateScheduleRequest
 import io.ktor.client.HttpClient
 import io.ktor.client.HttpClientConfig
 import io.ktor.client.call.body
@@ -105,6 +114,59 @@ class Esp32Api(
 
     suspend fun removeDevice(deviceId: String) {
         client.delete("$root/devices/$deviceId").ensureSuccess()
+    }
+
+    suspend fun groups(): GroupListResponse = client.get("$root/groups").bodyOrThrow()
+
+    suspend fun createGroup(name: String, deviceIds: List<String>): Group =
+        client.post("$root/groups") {
+            contentType(ContentType.Application.Json)
+            setBody(CreateGroupRequest(name = name, deviceIds = deviceIds))
+        }.bodyOrThrow()
+
+    suspend fun updateGroup(
+        groupId: String,
+        name: String? = null,
+        deviceIds: List<String>? = null,
+    ): Group = client.patch("$root/groups/$groupId") {
+        contentType(ContentType.Application.Json)
+        setBody(UpdateGroupRequest(name = name, deviceIds = deviceIds))
+    }.bodyOrThrow()
+
+    suspend fun removeGroup(groupId: String) {
+        client.delete("$root/groups/$groupId").ensureSuccess()
+    }
+
+    suspend fun sendGroupCommand(
+        groupId: String,
+        action: CommandAction,
+        idempotencyKey: String,
+    ): GroupCommandDispatched =
+        client.post("$root/groups/$groupId/commands") {
+            header("Idempotency-Key", idempotencyKey)
+            contentType(ContentType.Application.Json)
+            setBody(CommandRequest(action))
+        }.bodyOrThrow()
+
+    suspend fun schedules(): ScheduleListResponse =
+        client.get("$root/schedules").bodyOrThrow()
+
+    suspend fun createSchedule(request: CreateScheduleRequest): Schedule =
+        client.post("$root/schedules") {
+            contentType(ContentType.Application.Json)
+            setBody(request)
+        }.bodyOrThrow()
+
+    suspend fun updateSchedule(
+        scheduleId: String,
+        request: UpdateScheduleRequest,
+    ): Schedule = client.patch("$root/schedules/$scheduleId") {
+        contentType(ContentType.Application.Json)
+        setBody(request)
+    }.bodyOrThrow()
+
+    suspend fun removeSchedule(scheduleId: String) {
+        client.delete("$root/schedules/$scheduleId").ensureSuccess()
     }
 
     suspend fun startLearning(

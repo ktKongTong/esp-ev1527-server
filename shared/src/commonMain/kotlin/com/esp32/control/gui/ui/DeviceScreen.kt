@@ -183,7 +183,7 @@ internal fun EmptyDevices(gatewayOnline: Boolean, onLearn: () -> Unit) {
 }
 
 @Composable
-internal fun LoadingDevices() {
+internal fun LoadingDevices(label: String = "正在同步遥控器…") {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = AppShapes.Card,
@@ -199,18 +199,19 @@ internal fun LoadingDevices() {
         ) {
             CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
             Spacer(Modifier.width(12.dp))
-            Text("正在同步遥控器…", style = MaterialTheme.typography.bodyMedium)
+            Text(label, style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
 
-internal enum class BottomTab { Devices, Settings }
+internal enum class BottomTab { Devices, Groups, Schedules, Settings }
 
 @Composable
 internal fun BottomChrome(
     selected: BottomTab,
     onSelect: (BottomTab) -> Unit,
-    onLearn: () -> Unit,
+    onAdd: () -> Unit,
+    addDescription: String,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -223,29 +224,34 @@ internal fun BottomChrome(
         HorizontalFloatingToolbar(
             expanded = true,
             colors = FloatingToolbarDefaults.vibrantFloatingToolbarColors(),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
         ) {
-            ToggleButton(
+            TabButton(
                 checked = selected == BottomTab.Devices,
-                onCheckedChange = { onSelect(BottomTab.Devices) },
-                icon = { DeviceIcon(Modifier.size(ToggleButtonDefaults.IconSize)) },
-            ) {
-                Text("设备", style = MaterialTheme.typography.labelLarge)
-            }
-            Spacer(Modifier.width(4.dp))
-            ToggleButton(
+                description = "设备",
+                onClick = { onSelect(BottomTab.Devices) },
+            ) { DeviceIcon(Modifier.size(ToggleButtonDefaults.IconSize)) }
+            TabButton(
+                checked = selected == BottomTab.Groups,
+                description = "分组",
+                onClick = { onSelect(BottomTab.Groups) },
+            ) { GroupsIcon(Modifier.size(ToggleButtonDefaults.IconSize)) }
+            TabButton(
+                checked = selected == BottomTab.Schedules,
+                description = "定时",
+                onClick = { onSelect(BottomTab.Schedules) },
+            ) { ScheduleIcon(Modifier.size(ToggleButtonDefaults.IconSize)) }
+            TabButton(
                 checked = selected == BottomTab.Settings,
-                onCheckedChange = { onSelect(BottomTab.Settings) },
-                icon = { SettingsIcon(Modifier.size(ToggleButtonDefaults.IconSize)) },
-            ) {
-                Text("设置", style = MaterialTheme.typography.labelLarge)
-            }
+                description = "设置",
+                onClick = { onSelect(BottomTab.Settings) },
+            ) { SettingsIcon(Modifier.size(ToggleButtonDefaults.IconSize)) }
         }
 
-        // Learning belongs to the device list; the settings tab has no
-        // primary action.
+        // The settings tab has no primary action. The other tabs add the
+        // item they list.
         AnimatedVisibility(
-            visible = selected == BottomTab.Devices,
+            visible = selected != BottomTab.Settings,
             enter = fadeIn(tween(durationMillis = 150)) + scaleIn(
                 animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing),
                 initialScale = 0.8f,
@@ -256,16 +262,32 @@ internal fun BottomChrome(
             ),
         ) {
             FloatingActionButton(
-                onClick = onLearn,
+                onClick = onAdd,
                 shape = AppShapes.Fab,
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier.semantics { contentDescription = "学习新设备" },
+                modifier = Modifier.semantics { contentDescription = addDescription },
             ) {
                 AddIcon(Modifier.size(24.dp))
             }
         }
     }
+}
+
+@Composable
+private fun TabButton(
+    checked: Boolean,
+    description: String,
+    onClick: () -> Unit,
+    icon: @Composable () -> Unit,
+) {
+    ToggleButton(
+        checked = checked,
+        onCheckedChange = { onClick() },
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+        icon = icon,
+        modifier = Modifier.semantics { contentDescription = description },
+    ) {}
 }
 
 internal fun gatewayChipLabel(state: GatewayState?): String = when (state) {
