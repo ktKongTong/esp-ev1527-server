@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,6 +27,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingToolbarDefaults
 import androidx.compose.material3.HorizontalFloatingToolbar
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -43,6 +45,13 @@ import com.esp32.control.contract.CommandAction
 import com.esp32.control.contract.Device
 import com.esp32.control.contract.GatewayState
 import com.esp32.control.contract.HealthResponse
+import com.esp32.control.gui.resources.Res
+import com.esp32.control.gui.resources.ic_groups
+import com.esp32.control.gui.resources.ic_schedule
+import com.esp32.control.gui.resources.ic_settings
+import com.esp32.control.gui.resources.ic_settings_remote
+import org.jetbrains.compose.resources.DrawableResource
+import org.jetbrains.compose.resources.painterResource
 
 @Composable
 internal fun DeviceHeader(health: HealthResponse?) {
@@ -204,8 +213,23 @@ internal fun LoadingDevices(label: String = "正在同步遥控器…") {
     }
 }
 
-internal enum class BottomTab { Devices, Groups, Schedules, Settings }
+internal enum class BottomTab(
+    val key: String,
+    val label: String,
+    val icon: DrawableResource,
+    val addDescription: String,
+) {
+    Devices("devices", "设备", Res.drawable.ic_settings_remote, "学习新设备"),
+    Groups("groups", "分组", Res.drawable.ic_groups, "创建分组"),
+    Schedules("schedules", "定时", Res.drawable.ic_schedule, "创建定时"),
+    Settings("settings", "设置", Res.drawable.ic_settings, "设置"),
+}
 
+/**
+ * One bottom row: icon tabs on the left, add action on the right. The
+ * toolbar sizes itself to its items, so the dock stays compact and the
+ * remaining space pushes the FAB to the right edge.
+ */
 @Composable
 internal fun BottomChrome(
     selected: BottomTab,
@@ -217,39 +241,30 @@ internal fun BottomChrome(
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .navigationBarsPadding()
             .padding(horizontal = 20.dp, vertical = 16.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         HorizontalFloatingToolbar(
             expanded = true,
             colors = FloatingToolbarDefaults.vibrantFloatingToolbarColors(),
-            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
         ) {
-            TabButton(
-                checked = selected == BottomTab.Devices,
-                description = "设备",
-                onClick = { onSelect(BottomTab.Devices) },
-            ) { DeviceIcon(Modifier.size(ToggleButtonDefaults.IconSize)) }
-            TabButton(
-                checked = selected == BottomTab.Groups,
-                description = "分组",
-                onClick = { onSelect(BottomTab.Groups) },
-            ) { GroupsIcon(Modifier.size(ToggleButtonDefaults.IconSize)) }
-            TabButton(
-                checked = selected == BottomTab.Schedules,
-                description = "定时",
-                onClick = { onSelect(BottomTab.Schedules) },
-            ) { ScheduleIcon(Modifier.size(ToggleButtonDefaults.IconSize)) }
-            TabButton(
-                checked = selected == BottomTab.Settings,
-                description = "设置",
-                onClick = { onSelect(BottomTab.Settings) },
-            ) { SettingsIcon(Modifier.size(ToggleButtonDefaults.IconSize)) }
+            BottomTab.entries.forEach { tab ->
+                ToggleButton(
+                    checked = selected == tab,
+                    onCheckedChange = { onSelect(tab) },
+                ) {
+                    Icon(
+                        painter = painterResource(tab.icon),
+                        contentDescription = tab.label,
+                        modifier = Modifier.size(ToggleButtonDefaults.IconSize),
+                    )
+                }
+            }
         }
 
-        // The settings tab has no primary action. The other tabs add the
-        // item they list.
+        Spacer(Modifier.weight(1f))
+
         AnimatedVisibility(
             visible = selected != BottomTab.Settings,
             enter = fadeIn(tween(durationMillis = 150)) + scaleIn(
@@ -272,22 +287,6 @@ internal fun BottomChrome(
             }
         }
     }
-}
-
-@Composable
-private fun TabButton(
-    checked: Boolean,
-    description: String,
-    onClick: () -> Unit,
-    icon: @Composable () -> Unit,
-) {
-    ToggleButton(
-        checked = checked,
-        onCheckedChange = { onClick() },
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-        icon = icon,
-        modifier = Modifier.semantics { contentDescription = description },
-    ) {}
 }
 
 internal fun gatewayChipLabel(state: GatewayState?): String = when (state) {

@@ -47,6 +47,7 @@ kotlin {
             api(libs.compose.material3)
             api(libs.compose.ui)
             implementation(libs.compose.components.resources)
+            implementation(libs.compose.ui.backhandler)
 
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kotlinx.serialization.json)

@@ -19,6 +19,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -62,7 +63,6 @@ internal fun LearningSheet(
     onRescan: () -> Unit,
     onTest: (LearningSlot) -> Unit,
     onConfirm: (String, String) -> Unit,
-    onDismissError: () -> Unit,
     onClose: () -> Unit,
 ) {
     val sheetState = rememberBottomSheetState(
@@ -77,7 +77,6 @@ internal fun LearningSheet(
         shape = AppShapes.Sheet,
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         contentColor = MaterialTheme.colorScheme.onSurface,
-        dragHandle = { SheetDragHandle() },
     ) {
         Column(
             modifier = Modifier
@@ -106,7 +105,7 @@ internal fun LearningSheet(
             Spacer(Modifier.height(16.dp))
 
             errorText?.let {
-                ErrorBanner(message = it, onDismiss = onDismissError)
+                ErrorText(it)
                 Spacer(Modifier.height(16.dp))
             }
 
@@ -238,7 +237,12 @@ private fun CollectingPanel(
             color = MaterialTheme.colorScheme.primary,
         )
         Spacer(Modifier.height(10.dp))
-        ProgressBar(fraction = hits.toFloat() / learning.requiredHits.coerceAtLeast(1))
+        LinearProgressIndicator(
+            progress = {
+                (hits.toFloat() / learning.requiredHits.coerceAtLeast(1)).coerceIn(0f, 1f)
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
         Spacer(Modifier.height(12.dp))
         Text(
             text = "同一个键连续按，每次间隔约 1 秒。",

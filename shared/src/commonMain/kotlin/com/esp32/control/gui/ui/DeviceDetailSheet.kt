@@ -49,7 +49,6 @@ internal fun DeviceDetailSheet(
     onCommand: (CommandAction) -> Unit,
     onEdit: () -> Unit,
     onRemove: () -> Unit,
-    onDismissError: () -> Unit,
     onClose: () -> Unit,
 ) {
     val sheetState = rememberBottomSheetState(
@@ -65,7 +64,6 @@ internal fun DeviceDetailSheet(
         shape = AppShapes.Sheet,
         containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         contentColor = MaterialTheme.colorScheme.onSurface,
-        dragHandle = { SheetDragHandle() },
     ) {
         Column(
             modifier = Modifier
@@ -101,7 +99,7 @@ internal fun DeviceDetailSheet(
             Spacer(Modifier.height(16.dp))
 
             errorText?.let {
-                ErrorBanner(message = it, onDismiss = onDismissError)
+                ErrorText(it)
                 Spacer(Modifier.height(16.dp))
             }
 

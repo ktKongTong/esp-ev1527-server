@@ -41,7 +41,7 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
-import kotlin.random.Random
+import kotlin.uuid.Uuid
 
 expect fun createPlatformHttpClient(authToken: String = ""): HttpClient
 
@@ -226,14 +226,4 @@ class Esp32Api(
     }
 }
 
-fun newIdempotencyKey(): String {
-    val bytes = Random.nextBytes(18)
-    val hex = "0123456789abcdef"
-    return buildString(bytes.size * 2) {
-        for (byte in bytes) {
-            val value = byte.toInt() and 0xFF
-            append(hex[value ushr 4])
-            append(hex[value and 0x0F])
-        }
-    }
-}
+fun newIdempotencyKey(): String = Uuid.random().toString()

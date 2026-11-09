@@ -20,7 +20,6 @@ import com.esp32.control.gui.api.Esp32Api
 import com.esp32.control.gui.api.newIdempotencyKey
 import com.esp32.control.gui.settings.SettingsStore
 import com.esp32.control.gui.settings.normalizeServerUrl
-import com.esp32.control.gui.ui.BottomTab
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -46,7 +45,6 @@ import kotlinx.coroutines.sync.withLock
 internal data class AppUiState(
     val serverUrl: String? = null,
     val apiToken: String = "",
-    val selectedTab: BottomTab = BottomTab.Devices,
     val health: HealthResponse? = null,
     val devices: List<Device> = emptyList(),
     val groups: List<Group> = emptyList(),
@@ -124,10 +122,6 @@ internal class AppViewModel(
                 token = settingsStore.apiToken.first(),
             )
         }
-    }
-
-    fun selectTab(tab: BottomTab) {
-        _state.update { it.copy(selectedTab = tab) }
     }
 
     fun saveConnection(url: String, token: String) {
@@ -710,10 +704,6 @@ internal class AppViewModel(
         }
     }
 
-    fun dismissLearningError() {
-        _state.update { it.copy(learningError = null, error = null) }
-    }
-
     override fun onCleared() {
         connectionJob.cancel()
         api?.close()
@@ -909,6 +899,9 @@ internal class AppViewModel(
 
     private fun dropDevice(deviceId: String) {
         _state.update { current ->
+            val scheduleEditorRemoved = current.scheduleEditorTarget?.let {
+                it.targetType == ScheduleTarget.DEVICE && it.targetId == deviceId
+            } == true
             current.copy(
                 devices = current.devices.filterNot { it.id == deviceId },
                 groups = current.groups.map { group ->
@@ -925,29 +918,53 @@ internal class AppViewModel(
                 detailDeviceId = current.detailDeviceId?.takeUnless { it == deviceId },
                 editingDeviceId = current.editingDeviceId?.takeUnless { it == deviceId },
                 removalTargetId = current.removalTargetId?.takeUnless { it == deviceId },
+                scheduleEditorVisible =
+                    if (scheduleEditorRemoved) false else current.scheduleEditorVisible,
+                scheduleEditorTarget =
+                    if (scheduleEditorRemoved) null else current.scheduleEditorTarget,
+                scheduleError = if (scheduleEditorRemoved) null else current.scheduleError,
             )
         }
     }
 
     private fun dropGroup(groupId: String) {
         _state.update { current ->
+            val editingRemoved = current.groupEditorTarget?.id == groupId
+            // The server cascades group-targeted schedules on delete; an open
+            // editor for one of them has no target left to save.
+            val scheduleEditorRemoved = current.scheduleEditorTarget?.let {
+                it.targetType == ScheduleTarget.GROUP && it.targetId == groupId
+            } == true
             current.copy(
                 groups = current.groups.filterNot { it.id == groupId },
-                // The server cascades group-targeted schedules on delete.
                 schedules = current.schedules.filterNot {
                     it.targetType == ScheduleTarget.GROUP && it.targetId == groupId
                 },
                 groupRemovalTargetId = current.groupRemovalTargetId?.takeUnless { it == groupId },
+                groupEditorVisible = if (editingRemoved) false else current.groupEditorVisible,
+                groupEditorTarget = current.groupEditorTarget?.takeUnless { it.id == groupId },
+                groupError = if (editingRemoved) null else current.groupError,
+                scheduleEditorVisible =
+                    if (scheduleEditorRemoved) false else current.scheduleEditorVisible,
+                scheduleEditorTarget =
+                    if (scheduleEditorRemoved) null else current.scheduleEditorTarget,
+                scheduleError = if (scheduleEditorRemoved) null else current.scheduleError,
             )
         }
     }
 
     private fun dropSchedule(scheduleId: String) {
         _state.update { current ->
+            val editingRemoved = current.scheduleEditorTarget?.id == scheduleId
             current.copy(
                 schedules = current.schedules.filterNot { it.id == scheduleId },
                 scheduleRemovalTargetId =
                     current.scheduleRemovalTargetId?.takeUnless { it == scheduleId },
+                scheduleEditorVisible =
+                    if (editingRemoved) false else current.scheduleEditorVisible,
+                scheduleEditorTarget =
+                    current.scheduleEditorTarget?.takeUnless { it.id == scheduleId },
+                scheduleError = if (editingRemoved) null else current.scheduleError,
             )
         }
     }

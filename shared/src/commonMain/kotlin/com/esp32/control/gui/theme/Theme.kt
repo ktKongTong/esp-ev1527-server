@@ -44,7 +44,8 @@ private val Esp32Shapes = Shapes(
  * letter spacing. Sizes stay on the standard M3 scale so platform font
  * scaling and CJK line breaking keep working.
  */
-private val Esp32Typography = Typography(
+private fun esp32Typography(fontFamily: FontFamily): Typography = Typography(
+    fontFamily = fontFamily,
     headlineLarge = TextStyle(
         fontWeight = FontWeight.Bold,
         fontSize = 32.sp,
@@ -110,26 +111,8 @@ fun Esp32Theme(
 
     MaterialExpressiveTheme(
         colorScheme = platformColorScheme(darkTheme),
-        typography = Esp32Typography.withFontFamily(appFontFamily),
+        typography = esp32Typography(appFontFamily),
         shapes = Esp32Shapes,
         content = content,
     )
 }
-
-private fun Typography.withFontFamily(fontFamily: FontFamily): Typography = Typography(
-    displayLarge = displayLarge.copy(fontFamily = fontFamily),
-    displayMedium = displayMedium.copy(fontFamily = fontFamily),
-    displaySmall = displaySmall.copy(fontFamily = fontFamily),
-    headlineLarge = headlineLarge.copy(fontFamily = fontFamily),
-    headlineMedium = headlineMedium.copy(fontFamily = fontFamily),
-    headlineSmall = headlineSmall.copy(fontFamily = fontFamily),
-    titleLarge = titleLarge.copy(fontFamily = fontFamily),
-    titleMedium = titleMedium.copy(fontFamily = fontFamily),
-    titleSmall = titleSmall.copy(fontFamily = fontFamily),
-    bodyLarge = bodyLarge.copy(fontFamily = fontFamily),
-    bodyMedium = bodyMedium.copy(fontFamily = fontFamily),
-    bodySmall = bodySmall.copy(fontFamily = fontFamily),
-    labelLarge = labelLarge.copy(fontFamily = fontFamily),
-    labelMedium = labelMedium.copy(fontFamily = fontFamily),
-    labelSmall = labelSmall.copy(fontFamily = fontFamily),
-)
