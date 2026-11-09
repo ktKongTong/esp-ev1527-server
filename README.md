@@ -439,6 +439,59 @@ RX 注入只有 `POST /mock/press-button`。CLI 仅保留 `kill`、`boot`、
 5. **产物体积**：Web 产物约 19 MB（Wasm + Skiko + 字体），首次加载较慢。
    生产部署应启用 gzip/brotli 与长期缓存，字体可做子集化。
 
+## 发布版本（tag 驱动）
+
+`.github/workflows/release.yml` 在推送 `v*` tag 时构建产物并创建 GitHub
+Release：
+
+```bash
+git tag -a v0.2.0 -m "v0.2.0"
+git push origin v0.2.0
+```
+
+Release 资产：
+
+- `esp32-control-<version>-<short sha>.apk`：release 签名 APK，例如
+  `esp32-control-0.2.0-48cc49b.apk`。Gradle 通过 `git describe --tags` 读取
+  版本：`versionName` 为最近的 `v*` tag（去掉 `v`），
+  `versionCode = major*10000 + minor*100 + patch`（`v0.2.0` → `200`）。
+- `esp32-control-server-<version>-<os>-<arch>.tar.gz`：Go 服务端二进制，
+  覆盖 `linux/amd64`、`linux/arm64`、`darwin/arm64`。CGO 构建，每个目标在
+  对应架构的 runner 上原生编译。
+- tag 带后缀（如 `v0.2.0-rc1`）时 Release 标记为 prerelease。
+
+APK 使用仓库 secrets 中的 keystore 签名。缺少任一 secret 时工作流直接失败，
+不发布未签名产物。一次性配置：
+
+```bash
+# 生成 release keystore（只做一次；*.jks 已在 .gitignore 中）
+keytool -genkeypair -v -keystore release.jks -alias esp32-control \
+  -keyalg RSA -keysize 4096 -validity 10000
+
+base64 < release.jks | gh secret set ANDROID_KEYSTORE_BASE64
+gh secret set ANDROID_KEYSTORE_PASSWORD
+gh secret set ANDROID_KEY_ALIAS          # 填 esp32-control
+gh secret set ANDROID_KEY_PASSWORD
+```
+
+`keytool` 随 JDK 提供。keystore 与密码需另行备份；keystore 丢失后，已安装的
+APK 无法覆盖升级。
+
+本地复现同样的签名构建（路径相对仓库根目录）：
+
+```bash
+ANDROID_KEYSTORE_PATH=release.jks \
+ANDROID_KEYSTORE_PASSWORD='<store password>' \
+ANDROID_KEY_ALIAS=esp32-control \
+ANDROID_KEY_PASSWORD='<key password>' \
+./gradlew :androidApp:assembleRelease
+```
+
+未设置 `ANDROID_KEYSTORE_PATH` 等变量时，`assembleRelease` 仍可运行，但产物
+为未签名 APK。版本始终来自 git：HEAD 不在 tag 上时 `versionName` 形如
+`0.2.0-3-gabc1234`；仓库没有任何 `v*` tag 时为短 commit id；这两种情况
+`versionCode` 都回落到 `1`。
+
 ## 已验证内容（2026-11-07，Go + Turso 迁移）
 
 本次迁移后实际执行：

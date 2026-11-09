@@ -1,0 +1,198 @@
+name: Release
+
+# A release starts from a version tag:
+#
+#   git tag -a v0.2.0 -m "v0.2.0"
+#   git push origin v0.2.0
+#
+# The tag drives the APK versionName and versionCode. The Go server keeps the
+# version that internal/contract reports through /api/v1/health.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      name: ${{ steps.version.outputs.name }}
+    steps:
+      # The tag name is the single version source. Gradle reads it back through
+      # git describe; this step only rejects tags that are not release versions.
+      - name: Validate tag
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag $TAG is not a release version such as v1.2.3" >&2
+            exit 1
+          fi
+          echo "name=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+  apk:
+    name: Build signed APK
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # Full history and tags: git describe resolves the versionName.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      # A release must be signed; publish nothing rather than an APK that
+      # cannot be installed over the previous version.
+      - name: Require signing secrets
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          missing=0
+          for pair in \
+            "ANDROID_KEYSTORE_BASE64=$KEYSTORE" \
+            "ANDROID_KEYSTORE_PASSWORD=$STORE_PASSWORD" \
+            "ANDROID_KEY_ALIAS=$KEY_ALIAS" \
+            "ANDROID_KEY_PASSWORD=$KEY_PASSWORD"; do
+            if [ -z "${pair#*=}" ]; then
+              echo "::error::Repository secret ${pair%%=*} is not set. See README 发布版本。" >&2
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Decode keystore
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/signing"
+          printf '%s' "$KEYSTORE" | base64 --decode > "$RUNNER_TEMP/signing/release.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/signing/release.jks" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew :androidApp:assembleRelease --console=plain
+
+      - name: Verify and rename APK
+        env:
+          VERSION: ${{ needs.version.outputs.name }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          apk="androidApp/build/outputs/apk/release/androidApp-release.apk"
+          if [ ! -f "$apk" ]; then
+            echo "::error::Signed release APK not found at $apk" >&2
+            exit 1
+          fi
+          apksigner="$(ls -1 "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)"
+          "$apksigner" verify --print-certs "$apk"
+          cp "$apk" "esp32-control-${VERSION}-${COMMIT_SHA:0:7}.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: esp32-control-*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  server:
+    name: Build server ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The GORM sqlite dialector needs CGO, so each target builds natively
+        # on a runner of its own architecture instead of cross-compiling.
+        include:
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-latest
+          - goos: linux
+            goarch: arm64
+            runner: ubuntu-24.04-arm
+          - goos: darwin
+            goarch: arm64
+            runner: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go-server/go.mod
+          cache-dependency-path: go-server/go.sum
+
+      - name: Build server binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.version.outputs.name }}
+        run: |
+          cd go-server
+          CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" \
+            -o "$RUNNER_TEMP/esp32-control-server" .
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          tar -C "$RUNNER_TEMP" -czf \
+            "$GITHUB_WORKSPACE/dist/esp32-control-server-${VERSION}-${GOOS}-${GOARCH}.tar.gz" \
+            esp32-control-server
+
+      - name: Upload server binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub release
+    needs: [version, apk, server]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.version.outputs.name }}
+        run: |
+          ls -l dist
+          flags=()
+          if [[ "$VERSION" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --generate-notes \
+            "${flags[@]}"
