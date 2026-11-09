@@ -9,7 +9,7 @@ plugins {
 
 kotlin {
     android {
-        namespace = "com.esp32.control.contract"
+        namespace = "dev.koft.ev1527.contract"
         compileSdk = libs.versions.android.compile.sdk.get().toInt()
         minSdk = libs.versions.android.min.sdk.get().toInt()
 

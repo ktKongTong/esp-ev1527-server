@@ -1,0 +1,6 @@
+package dev.koft.ev1527.gui.data
+
+import androidx.compose.runtime.Composable
+
+@Composable
+internal expect fun rememberLocalStore(): LocalStore

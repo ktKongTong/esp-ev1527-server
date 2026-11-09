@@ -14,7 +14,7 @@ kotlin {
     // AGP 9 requires the dedicated Android KMP library plugin instead of
     // com.android.library + androidTarget().
     android {
-        namespace = "com.esp32.control.gui.shared"
+        namespace = "dev.koft.ev1527.gui.shared"
         // Compose 1.13 requires Android API 37.1+; the KMP Android plugin
         // expresses the minor level through the compileSdk spec.
         compileSdk {
@@ -74,7 +74,7 @@ kotlin {
 }
 
 compose.resources {
-    packageOfResClass = "com.esp32.control.gui.resources"
+    packageOfResClass = "dev.koft.ev1527.gui.resources"
 }
 
 dependencies {

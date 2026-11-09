@@ -261,7 +261,7 @@ python3 -m http.server 8081 \
 
 Web 端默认请求 `http://<当前页面主机名>:8080`。从局域网访问时，服务端与
 Web 需在同一台机器，或自行调整
-[`Esp32Api.wasmJs.kt`](shared/src/wasmJsMain/kotlin/com/esp32/control/gui/api/Esp32Api.wasmJs.kt)。
+[`Esp32Api.wasmJs.kt`](shared/src/wasmJsMain/kotlin/dev/koft/ev1527/gui/api/Esp32Api.wasmJs.kt)。
 
 ### 4. 构建 / 安装 Android
 
@@ -274,7 +274,7 @@ Web 需在同一台机器，或自行调整
 
 - 模拟器默认访问 `http://10.0.2.2:8080`（宿主机别名）。
 - 真机调试请把
-  [`Esp32Api.android.kt`](shared/src/androidMain/kotlin/com/esp32/control/gui/api/Esp32Api.android.kt)
+  [`Esp32Api.android.kt`](shared/src/androidMain/kotlin/dev/koft/ev1527/gui/api/Esp32Api.android.kt)
   中的地址改成开发机局域网 IP。
 - Manifest 已开启 `usesCleartextTraffic`，仅适合开发环境；正式发布请改为
   HTTPS 并收紧网络安全配置。

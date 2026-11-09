@@ -39,12 +39,14 @@ val hasReleaseSigning = listOf(
 ).all { it.isPresent }
 
 android {
-    namespace = "com.esp32.control.gui.android"
+    namespace = "dev.koft.ev1527.gui.android"
     compileSdk = libs.versions.android.compile.sdk.get().toInt()
     compileSdkMinor = libs.versions.android.sdk.minor.get().toInt()
 
     defaultConfig {
-        applicationId = "com.esp32.control"
+        // Android application IDs cannot contain hyphens, so the word
+        // separators are underscores.
+        applicationId = "dev.koft.esp_ev1527_ctl"
         minSdk = libs.versions.android.min.sdk.get().toInt()
         targetSdk = libs.versions.android.target.sdk.get().toInt()
         versionCode = appVersionCode
@@ -63,6 +65,13 @@ android {
     }
 
     buildTypes {
+        // Debug builds install next to the release app. AGP appends the
+        // suffix as a new package segment, so the ID becomes
+        // dev.koft.esp_ev1527_ctl.debug.
+        getByName("debug") {
+            applicationIdSuffix = ".debug"
+        }
+
         getByName("release") {
             isMinifyEnabled = false
             signingConfig = signingConfigs.findByName("release")

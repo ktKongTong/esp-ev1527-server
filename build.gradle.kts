@@ -9,6 +9,6 @@ plugins {
 }
 
 allprojects {
-    group = "com.esp32.control"
+    group = "dev.koft.ev1527"
     version = "0.1.0"
 }
