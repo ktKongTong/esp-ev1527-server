@@ -7,7 +7,7 @@ package contract
 const (
 	ContractVersion = "2.3.0"
 	APIVersion      = "1"
-	ServerVersion   = "0.3.0"
+	ServerVersion   = "0.4.0"
 	ServiceName     = "esp32-control-server"
 )
 
