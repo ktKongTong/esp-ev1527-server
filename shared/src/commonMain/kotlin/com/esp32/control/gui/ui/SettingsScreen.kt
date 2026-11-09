@@ -7,23 +7,29 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.esp32.control.gui.AppUiState
+import com.esp32.control.gui.AppViewModel
 import com.esp32.control.gui.settings.normalizeServerUrl
 
 @Composable
@@ -116,5 +122,28 @@ internal fun SettingsScreen(
                 Text("保存并重新连接")
             }
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun SettingsDestination(
+    state: AppUiState,
+    viewModel: AppViewModel,
+) {
+    PullToRefreshBox(
+        isRefreshing = state.refresh.running,
+        onRefresh = viewModel::refresh,
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        SettingsScreen(
+            serverUrl = state.serverUrl.orEmpty(),
+            apiToken = state.apiToken,
+            onSave = viewModel::saveConnection,
+            modifier = Modifier
+                .widthIn(max = 720.dp)
+                .fillMaxSize(),
+        )
     }
 }

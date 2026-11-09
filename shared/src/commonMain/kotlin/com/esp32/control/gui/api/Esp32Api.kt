@@ -73,6 +73,10 @@ class ClientApiException(
     val requestId: String? = null,
 ) : RuntimeException(message)
 
+/** The addressed resource no longer exists on the current server. */
+internal fun Throwable.isGone(): Boolean =
+    this is ClientApiException && (status == 404 || status == 410)
+
 class Esp32Api(
     val baseUrl: String,
     val token: String = "",

@@ -7,6 +7,7 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.compose.multiplatform)
     alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.ksp)
 }
 
 kotlin {
@@ -42,6 +43,7 @@ kotlin {
         commonMain.dependencies {
             api(project(":contract"))
             api(libs.compose.runtime)
+            implementation(libs.compose.runtime.saveable)
             api(libs.compose.animation)
             api(libs.compose.foundation)
             api(libs.compose.material3)
@@ -61,6 +63,8 @@ kotlin {
         }
         androidMain.dependencies {
             implementation(libs.ktor.client.cio)
+            implementation(libs.androidx.room3.runtime)
+            implementation(libs.androidx.sqlite.bundled)
         }
         wasmJsMain.dependencies {
             implementation(libs.ktor.client.js)
@@ -71,4 +75,8 @@ kotlin {
 
 compose.resources {
     packageOfResClass = "com.esp32.control.gui.resources"
+}
+
+dependencies {
+    add("kspAndroid", libs.androidx.room3.compiler)
 }

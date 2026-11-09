@@ -42,6 +42,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +57,8 @@ import com.esp32.control.contract.Device
 import com.esp32.control.contract.Group
 import com.esp32.control.contract.Schedule
 import com.esp32.control.contract.ScheduleTarget
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.launch
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Instant
@@ -82,6 +87,24 @@ private val weekdayOrder = listOf(
     DayOfWeek.FRIDAY,
     DayOfWeek.SATURDAY,
     DayOfWeek.SUNDAY,
+)
+
+private fun <T : Enum<T>> enumSaver(values: Array<T>): Saver<T, String> = Saver(
+    save = { it.name },
+    restore = { name -> values.firstOrNull { it.name == name } ?: values.first() },
+)
+
+private val scheduleTargetSaver = enumSaver(ScheduleTarget.entries.toTypedArray())
+private val commandActionSaver = enumSaver(CommandAction.entries.toTypedArray())
+private val repeatPresetSaver = enumSaver(RepeatPreset.entries.toTypedArray())
+
+private val weekdaySetSaver: Saver<Set<DayOfWeek>, String> = Saver(
+    save = { days -> days.joinToString(",") { it.rruleCode() } },
+    restore = { text ->
+        text.split(',')
+            .mapNotNull { code -> weekdayOrder.firstOrNull { it.rruleCode() == code } }
+            .toSet()
+    },
 )
 
 private val weeklyByDayRule = Regex(
@@ -164,8 +187,6 @@ internal fun ScheduleEditorSheet(
     schedule: Schedule?,
     devices: List<Device>,
     groups: List<Group>,
-    busy: Boolean,
-    errorText: String?,
     onSave: (
         name: String,
         targetType: ScheduleTarget,
@@ -175,7 +196,7 @@ internal fun ScheduleEditorSheet(
         timeZone: String,
         startsAtEpochMs: Long,
         enabled: Boolean,
-    ) -> Unit,
+    ) -> Deferred<String?>,
     onRemove: (() -> Unit)?,
     onDismiss: () -> Unit,
 ) {
@@ -196,14 +217,18 @@ internal fun ScheduleEditorSheet(
             groups.firstOrNull()?.id.orEmpty()
         }
 
-    var name by remember(schedule?.id) { mutableStateOf(schedule?.name.orEmpty()) }
-    var targetType by remember(schedule?.id) { mutableStateOf(initialTargetType) }
-    var targetId by remember(schedule?.id) { mutableStateOf(initialTargetId) }
-    var action by remember(schedule?.id) {
+    var name by rememberSaveable(schedule?.id) { mutableStateOf(schedule?.name.orEmpty()) }
+    var targetType by rememberSaveable(schedule?.id, stateSaver = scheduleTargetSaver) {
+        mutableStateOf(initialTargetType)
+    }
+    var targetId by rememberSaveable(schedule?.id) { mutableStateOf(initialTargetId) }
+    var action by rememberSaveable(schedule?.id, stateSaver = commandActionSaver) {
         mutableStateOf(schedule?.action ?: CommandAction.TURN_ON)
     }
-    var preset by remember(schedule?.id) { mutableStateOf(initialPreset) }
-    var weekdays by remember(schedule?.id) {
+    var preset by rememberSaveable(schedule?.id, stateSaver = repeatPresetSaver) {
+        mutableStateOf(initialPreset)
+    }
+    var weekdays by rememberSaveable(schedule?.id, stateSaver = weekdaySetSaver) {
         mutableStateOf(
             if (initialPreset == RepeatPreset.Weekly) {
                 weeklyDaysOf(initialRule).ifEmpty { setOf(initialTime.date.dayOfWeek) }
@@ -212,17 +237,29 @@ internal fun ScheduleEditorSheet(
             },
         )
     }
-    var startHour by remember(schedule?.id) { mutableStateOf(initialTime.hour) }
-    var startMinute by remember(schedule?.id) { mutableStateOf(initialTime.minute) }
-    var enabled by remember(schedule?.id) { mutableStateOf(schedule?.enabled ?: true) }
+    var startHour by rememberSaveable(schedule?.id) { mutableStateOf(initialTime.hour) }
+    var startMinute by rememberSaveable(schedule?.id) { mutableStateOf(initialTime.minute) }
+    var enabled by rememberSaveable(schedule?.id) { mutableStateOf(schedule?.enabled ?: true) }
     var localError by remember(schedule?.id) { mutableStateOf<String?>(null) }
     var targetMenuExpanded by remember(schedule?.id) { mutableStateOf(false) }
     var showTimePicker by remember(schedule?.id) { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    var saveError by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
 
     val sheetState = rememberBottomSheetState(
         initialValue = SheetValue.Hidden,
         enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
     )
+
+    // Buttons must wait for the hide animation before the caller removes the
+    // sheet from composition; gesture dismissal arrives through onDismissRequest.
+    fun dismiss() {
+        scope.launch { sheetState.hide() }.invokeOnCompletion {
+            if (!sheetState.isVisible) onDismiss()
+        }
+    }
+
     val selectedTargetLabel = when (targetType) {
         ScheduleTarget.DEVICE -> devices.firstOrNull { it.id == targetId }
             ?.let { "${it.name} · ${it.location}" }
@@ -233,6 +270,45 @@ internal fun ScheduleEditorSheet(
     val targetExists = when (targetType) {
         ScheduleTarget.DEVICE -> devices.any { it.id == targetId }
         ScheduleTarget.GROUP -> groups.any { it.id == targetId }
+    }
+
+    fun submit() {
+        if (busy) return
+        localError = when {
+            !targetExists -> "请选择目标"
+            preset == RepeatPreset.Weekly && weekdays.isEmpty() -> "请选择每周重复的日子"
+            else -> null
+        }
+        if (localError != null) return
+        busy = true
+        saveError = null
+        scope.launch {
+            val message = try {
+                onSave(
+                    name.trim(),
+                    targetType,
+                    targetId,
+                    action,
+                    buildRrule(preset, weekdays),
+                    scheduleTimeZone.id,
+                    nextStart(
+                        preset = preset,
+                        weekdays = weekdays,
+                        hour = startHour,
+                        minute = startMinute,
+                        now = Clock.System.now(),
+                    ),
+                    enabled,
+                ).await()
+            } finally {
+                busy = false
+            }
+            if (message == null) {
+                dismiss()
+            } else {
+                saveError = message
+            }
+        }
     }
 
     ModalBottomSheet(
@@ -256,7 +332,7 @@ internal fun ScheduleEditorSheet(
                     modifier = Modifier.weight(1f),
                 )
                 IconButton(
-                    onClick = onDismiss,
+                    onClick = ::dismiss,
                     enabled = !busy,
                     modifier = Modifier.semantics { contentDescription = "关闭" },
                 ) {
@@ -411,7 +487,7 @@ internal fun ScheduleEditorSheet(
                 Switch(checked = enabled, onCheckedChange = { enabled = it })
             }
 
-            val error = localError ?: errorText
+            val error = localError ?: saveError
             error?.let { message ->
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -423,33 +499,7 @@ internal fun ScheduleEditorSheet(
 
             Spacer(Modifier.height(16.dp))
             Button(
-                onClick = {
-                    localError = when {
-                        !targetExists -> "请选择目标"
-                        preset == RepeatPreset.Weekly && weekdays.isEmpty() ->
-                            "请选择每周重复的日子"
-
-                        else -> null
-                    }
-                    if (localError == null) {
-                        onSave(
-                            name.trim(),
-                            targetType,
-                            targetId,
-                            action,
-                            buildRrule(preset, weekdays),
-                            scheduleTimeZone.id,
-                            nextStart(
-                                preset = preset,
-                                weekdays = weekdays,
-                                hour = startHour,
-                                minute = startMinute,
-                                now = Clock.System.now(),
-                            ),
-                            enabled,
-                        )
-                    }
-                },
+                onClick = { submit() },
                 enabled = !busy,
                 shape = CircleShape,
                 modifier = Modifier

@@ -29,6 +29,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -38,6 +40,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.esp32.control.contract.CommandAction
 import com.esp32.control.contract.Device
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -45,7 +49,6 @@ internal fun DeviceDetailSheet(
     device: Device,
     pending: Boolean,
     gatewayOnline: Boolean,
-    errorText: String?,
     onCommand: (CommandAction) -> Unit,
     onEdit: () -> Unit,
     onRemove: () -> Unit,
@@ -55,7 +58,16 @@ internal fun DeviceDetailSheet(
         initialValue = SheetValue.Hidden,
         enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
     )
+    val scope = rememberCoroutineScope()
     val enabled = gatewayOnline && !pending
+
+    // Buttons must wait for the hide animation before the caller removes the
+    // sheet from composition; gesture dismissal arrives through onDismissRequest.
+    fun dismiss() {
+        scope.launch { sheetState.hide() }.invokeOnCompletion {
+            if (!sheetState.isVisible) onClose()
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onClose,
@@ -86,7 +98,7 @@ internal fun DeviceDetailSheet(
                     Text("编辑")
                 }
                 FilledTonalIconButton(
-                    onClick = onClose,
+                    onClick = ::dismiss,
                     shape = CircleShape,
                     modifier = Modifier
                         .size(44.dp)
@@ -97,11 +109,6 @@ internal fun DeviceDetailSheet(
             }
 
             Spacer(Modifier.height(16.dp))
-
-            errorText?.let {
-                ErrorText(it)
-                Spacer(Modifier.height(16.dp))
-            }
 
             SectionSurface {
                 CodeRow(label = "开码", code = device.codeOn)
@@ -176,13 +183,32 @@ internal fun DeviceDetailSheet(
 @Composable
 internal fun DeviceEditDialog(
     device: Device,
-    busy: Boolean,
-    errorText: String?,
-    onSave: (String, String) -> Unit,
+    onSave: (String, String) -> Deferred<String?>,
     onDismiss: () -> Unit,
 ) {
-    var name by remember(device.id) { mutableStateOf(device.name) }
-    var location by remember(device.id) { mutableStateOf(device.location) }
+    var name by rememberSaveable(device.id) { mutableStateOf(device.name) }
+    var location by rememberSaveable(device.id) { mutableStateOf(device.location) }
+    var busy by remember { mutableStateOf(false) }
+    var errorText by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    fun submit() {
+        if (busy) return
+        busy = true
+        errorText = null
+        scope.launch {
+            val message = try {
+                onSave(name.trim(), location.trim()).await()
+            } finally {
+                busy = false
+            }
+            if (message == null) {
+                onDismiss()
+            } else {
+                errorText = message
+            }
+        }
+    }
 
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
@@ -226,7 +252,7 @@ internal fun DeviceEditDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onSave(name.trim(), location.trim()) },
+                onClick = { submit() },
                 enabled = !busy && name.isNotBlank() && location.isNotBlank(),
                 shape = CircleShape,
             ) {

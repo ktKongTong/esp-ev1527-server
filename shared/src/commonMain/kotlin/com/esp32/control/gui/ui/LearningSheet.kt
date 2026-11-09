@@ -31,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -42,6 +43,7 @@ import com.esp32.control.contract.LearningCandidate
 import com.esp32.control.contract.LearningSession
 import com.esp32.control.contract.LearningSlot
 import com.esp32.control.contract.LearningState
+import kotlinx.coroutines.launch
 
 /**
  * Opening this sheet creates a learning session; dismissing it cancels the
@@ -69,6 +71,15 @@ internal fun LearningSheet(
         initialValue = SheetValue.Hidden,
         enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
     )
+    val scope = rememberCoroutineScope()
+
+    // Buttons must wait for the hide animation before the caller removes the
+    // sheet from composition; gesture dismissal arrives through onDismissRequest.
+    fun close() {
+        scope.launch { sheetState.hide() }.invokeOnCompletion {
+            if (!sheetState.isVisible) onClose()
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onClose,
@@ -92,7 +103,7 @@ internal fun LearningSheet(
                     modifier = Modifier.weight(1f),
                 )
                 FilledTonalIconButton(
-                    onClick = onClose,
+                    onClick = ::close,
                     shape = CircleShape,
                     modifier = Modifier
                         .size(44.dp)
@@ -143,14 +154,14 @@ internal fun LearningSheet(
                 LearningState.COMPLETED ->
                     CompletedPanel(
                         deviceName = completedDeviceName ?: "新设备",
-                        onClose = onClose,
+                        onClose = ::close,
                     )
 
                 LearningState.EXPIRED, LearningState.FAILED, LearningState.CANCELLED ->
                     TerminalPanel(
                         learning = learning,
                         onRetry = onStart,
-                        onClose = onClose,
+                        onClose = ::close,
                     )
             }
         }

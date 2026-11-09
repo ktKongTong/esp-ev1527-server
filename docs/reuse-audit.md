@@ -392,3 +392,31 @@ HTTP 契约、MQTT 协议、状态机与表结构不变。
 - 未执行：真实网关下的定时 RF 发射、跨时区 DST 切换的端到端验证、真实 Turso Cloud。
 - 客户端时间转换暂无单元测试：`shared` 没有测试源集，本次未为几个纯转换函数
   新增测试基础设施。
+
+## 11. 2026-11-09 客户端本地缓存
+
+### 11.1 复用
+
+| 能力 | 复用 | 说明 |
+| --- | --- | --- |
+| 本地数据库 | `androidx.room3:room3-runtime:3.0.3` + `androidx.sqlite:sqlite-bundled:2.7.1` | 客户端读缓存；Room 负责 SQLite 访问、事务与 Flow |
+| 编译期代码生成 | KSP 2.3.13（`kspAndroid`） | 生成 `AppDatabase_Impl` / `CacheDao_Impl` |
+| JSON | `ContractJson` | `Group.deviceIds` 以 JSON 列存储，不新增序列化层 |
+| 下拉刷新 | Material3 `PullToRefreshBox` | 不引入额外刷新库 |
+| 状态容器 | 现有 `AppViewModel` | 只保存界面状态；列表数据以 `StateFlow` 暴露，不复制进 `AppUiState`；数据访问统一经 `Esp32Repository` |
+| 数据边界 | 新增 `Esp32Repository` | 承接原 ViewModel 内的 HTTP 客户端、连接切换、刷新与写路径，不新增第二套客户端 |
+
+### 11.2 未复用
+
+| 方案 | 原因 |
+| --- | --- |
+| 自研 SQLite 封装 | 重复 Room 的 schema、DAO、事务与 Flow 能力 |
+| PowerSync / Turso Android SDK | 与 Room 3 集成不成熟或不支持当前 Turso 后端；本版写路径保持 REST |
+| wasmJs Room | 当前无可用 wasmJs 目标；Web 使用内存实现 |
+
+### 11.3 实现范围
+
+`Esp32Repository` 负责刷新、写后缓存更新与连接切换；`AppViewModel` 只保留
+界面状态并调用 Repository，设备/分组/定时列表由 Repository Flow 经
+`stateIn` 转发给界面。无 outbox、变更日志、推送或冲突合并。
+详见 `docs/local-cache.md`。

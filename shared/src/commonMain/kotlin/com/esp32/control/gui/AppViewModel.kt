@@ -3,7 +3,6 @@ package com.esp32.control.gui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.esp32.control.contract.CommandAction
-import com.esp32.control.contract.CreateScheduleRequest
 import com.esp32.control.contract.Device
 import com.esp32.control.contract.GatewayState
 import com.esp32.control.contract.Group
@@ -14,108 +13,112 @@ import com.esp32.control.contract.LearningSlot
 import com.esp32.control.contract.LearningState
 import com.esp32.control.contract.Schedule
 import com.esp32.control.contract.ScheduleTarget
-import com.esp32.control.contract.UpdateScheduleRequest
 import com.esp32.control.gui.api.ClientApiException
-import com.esp32.control.gui.api.Esp32Api
-import com.esp32.control.gui.api.newIdempotencyKey
+import com.esp32.control.gui.api.isGone
+import com.esp32.control.gui.data.Esp32Repository
+import com.esp32.control.gui.data.NotConnectedException
 import com.esp32.control.gui.settings.SettingsStore
 import com.esp32.control.gui.settings.normalizeServerUrl
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 
+internal data class RefreshUiState(
+    val hasSnapshot: Boolean = false,
+    val running: Boolean = false,
+    val error: String? = null,
+)
 
-//
+internal data class LearningUiState(
+    val visible: Boolean = false,
+    val session: LearningSession? = null,
+    val pollingSessionId: String? = null,
+    val busy: Boolean = false,
+    val error: String? = null,
+    val testMessage: String? = null,
+    val completedDeviceName: String? = null,
+)
+
 /**
- * Owns all client state and the network work behind it. The composables only
- * render [state] and call the actions here, so configuration changes and
- * navigation do not restart polling or lose device state.
+ * Screen state and user actions. All data access goes through
+ * [Esp32Repository]; this class does not create clients or touch the cache.
+ * Dialogs and editor sheets keep their open state and form fields locally.
  */
 internal data class AppUiState(
     val serverUrl: String? = null,
     val apiToken: String = "",
     val health: HealthResponse? = null,
-    val devices: List<Device> = emptyList(),
-    val groups: List<Group> = emptyList(),
-    val schedules: List<Schedule> = emptyList(),
-    val loading: Boolean = true,
+    val refresh: RefreshUiState = RefreshUiState(),
     val pendingDeviceId: String? = null,
-    val error: String? = null,
-    val detailDeviceId: String? = null,
-    val editingDeviceId: String? = null,
-    val editBusy: Boolean = false,
-    val editError: String? = null,
-    val removalTargetId: String? = null,
     val pendingGroupId: String? = null,
-    val groupNotice: String? = null,
-    val groupEditorVisible: Boolean = false,
-    val groupEditorTarget: Group? = null,
-    val groupBusy: Boolean = false,
-    val groupError: String? = null,
-    val groupRemovalTargetId: String? = null,
     val pendingScheduleId: String? = null,
-    val scheduleEditorVisible: Boolean = false,
-    val scheduleEditorTarget: Schedule? = null,
-    val scheduleBusy: Boolean = false,
-    val scheduleError: String? = null,
-    val scheduleRemovalTargetId: String? = null,
-    val learningVisible: Boolean = false,
-    val learning: LearningSession? = null,
-    val learningId: String? = null,
-    val learningBusy: Boolean = false,
-    val learningError: String? = null,
-    val testMessage: String? = null,
-    val completedDeviceName: String? = null,
+    val learning: LearningUiState = LearningUiState(),
 ) {
+    /** Skeleton only before the first snapshot or a full-screen cache error. */
+    val loading: Boolean
+        get() = !refresh.hasSnapshot && refresh.error == null
+
     val gatewayOnline: Boolean
         get() = health?.gateway?.state == GatewayState.ONLINE
-
-    val detailDevice: Device?
-        get() = detailDeviceId?.let { id -> devices.firstOrNull { it.id == id } }
-
-    val editingDevice: Device?
-        get() = editingDeviceId?.let { id -> devices.firstOrNull { it.id == id } }
-
-    val removalTarget: Device?
-        get() = removalTargetId?.let { id -> devices.firstOrNull { it.id == id } }
-
-    val groupRemovalTarget: Group?
-        get() = groupRemovalTargetId?.let { id -> groups.firstOrNull { it.id == id } }
-
-    val scheduleRemovalTarget: Schedule?
-        get() = scheduleRemovalTargetId?.let { id -> schedules.firstOrNull { it.id == id } }
 }
 
 internal class AppViewModel(
     private val settingsStore: SettingsStore,
+    private val repository: Esp32Repository,
 ) : ViewModel() {
     private val _state = MutableStateFlow(AppUiState())
     val state: StateFlow<AppUiState> = _state.asStateFlow()
 
-    private var api: Esp32Api? = null
+    // Cached reads stay Flows end to end: the UI collects them where they are
+    // used instead of the ViewModel copying them into [AppUiState].
+    val devices: StateFlow<List<Device>> =
+        repository.devices.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val groups: StateFlow<List<Group>> =
+        repository.groups.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+    val schedules: StateFlow<List<Schedule>> =
+        repository.schedules.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    // One-shot user-facing messages. Errors and notices must not be stored in
+    // the screen state: a snackbar shows them once and the state stays clean.
+    private val _messages = Channel<String>(Channel.BUFFERED)
+    val messages: Flow<String> = _messages.receiveAsFlow()
+
     private var learningPollJob: Job? = null
+    private var refreshJob: Job? = null
 
-    // Work for the current server URL. Reconnecting cancels this scope so
-    // in-flight requests cannot write results into the new connection's state.
-    private var connectionJob = SupervisorJob(viewModelScope.coroutineContext[Job])
-    private var connectionScope = CoroutineScope(viewModelScope.coroutineContext + connectionJob)
-
-    // Serializes learning session create/cancel so a close followed by an
-    // immediate reopen cannot hit the server's single-active-session limit.
-    private val sessionMutex = Mutex()
+    // Results from the previous server must not change the new connection's
+    // UI. The repository guards its cache the same way.
+    private var connectionEpoch = 0
 
     init {
+        viewModelScope.launch {
+            repository.lastSyncedAtEpochMs.collect { syncedAt ->
+                _state.update {
+                    it.copy(refresh = it.refresh.copy(hasSnapshot = syncedAt != null))
+                }
+            }
+        }
+        viewModelScope.launch {
+            repository.health.collect { health ->
+                _state.update { it.copy(health = health) }
+                maybeStartLearning()
+            }
+        }
         viewModelScope.launch {
             connect(
                 url = settingsStore.serverUrl.first(),
@@ -135,87 +138,31 @@ internal class AppViewModel(
         }
     }
 
-    fun dismissError() {
-        _state.update { it.copy(error = null) }
+    /** Pull-to-refresh entry point. Concurrent calls share the running refresh. */
+    fun refresh() {
+        startRefresh(force = false)
     }
 
-    fun openDetails(deviceId: String) {
-        _state.update { it.copy(detailDeviceId = deviceId) }
-    }
-
-    fun closeDetails() {
-        _state.update { it.copy(detailDeviceId = null) }
-    }
-
-    fun openEditor(deviceId: String) {
-        _state.update { it.copy(editingDeviceId = deviceId, editError = null) }
-    }
-
-    fun closeEditor() {
-        if (_state.value.editBusy) return
-        _state.update { it.copy(editingDeviceId = null, editError = null) }
-    }
-
-    fun saveDevice(deviceId: String, name: String, location: String) {
-        if (_state.value.editBusy) return
-        val client = api ?: return
-        _state.update { it.copy(editBusy = true, editError = null) }
-        connectionScope.launch {
-            try {
-                val updated = client.updateDevice(deviceId, name, location)
-                _state.update { current ->
-                    current.copy(
-                        devices = current.devices.map { device ->
-                            if (device.id == updated.id) updated else device
-                        },
-                        editingDeviceId = null,
-                        editBusy = false,
-                        editError = null,
-                        error = null,
-                    )
-                }
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
-                    dropDevice(deviceId)
-                    _state.update {
-                        it.copy(editBusy = false, editError = null, error = t.readableMessage())
-                    }
-                } else {
-                    _state.update { it.copy(editBusy = false, editError = t.readableMessage()) }
-                }
-            }
-        }
-    }
-
-    fun requestRemoval(deviceId: String) {
-        _state.update { it.copy(removalTargetId = deviceId) }
-    }
-
-    fun dismissRemoval() {
-        _state.update { it.copy(removalTargetId = null) }
-    }
+    /**
+     * Saves the device and completes with null, or with a user-readable error.
+     * The caller owns the dialog and its busy state.
+     */
+    fun saveDevice(deviceId: String, name: String, location: String): Deferred<String?> =
+        runWrite { repository.saveDevice(deviceId, name, location) }
 
     fun sendCommand(deviceId: String, action: CommandAction) {
         if (_state.value.pendingDeviceId != null) return
-        val client = api ?: return
+        val epoch = connectionEpoch
         _state.update { it.copy(pendingDeviceId = deviceId) }
-        connectionScope.launch {
+        viewModelScope.launch {
             try {
-                client.sendCommand(
-                    deviceId = deviceId,
-                    action = action,
-                    idempotencyKey = newIdempotencyKey(),
-                )
-                _state.update { it.copy(error = null) }
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                _state.update { it.copy(error = t.readableMessage()) }
-                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
-                    refreshDevices()
+                val error = repository.sendCommand(deviceId, action).exceptionOrNull()
+                if (epoch == connectionEpoch && error != null) {
+                    postMessage(error.readableMessage())
+                    if (error.isGone()) startRefresh(force = true)
                 }
             } finally {
-                if (api === client) {
+                if (epoch == connectionEpoch) {
                     _state.update { it.copy(pendingDeviceId = null) }
                 }
             }
@@ -223,167 +170,65 @@ internal class AppViewModel(
     }
 
     fun removeDevice(deviceId: String) {
-        val client = api ?: return
-        _state.update { it.copy(removalTargetId = null) }
-        connectionScope.launch {
-            try {
-                client.removeDevice(deviceId)
-                dropDevice(deviceId)
-                _state.update { it.copy(error = null) }
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
-                    dropDevice(deviceId)
-                } else {
-                    _state.update { it.copy(error = t.readableMessage()) }
-                }
-            }
-        }
+        launchRemove { repository.removeDevice(deviceId) }
     }
 
-    fun openGroupEditor(groupId: String? = null) {
-        val target = groupId?.let { id -> _state.value.groups.firstOrNull { it.id == id } }
-        if (groupId != null && target == null) return
-        _state.update {
-            it.copy(
-                groupEditorVisible = true,
-                groupEditorTarget = target,
-                groupError = null,
-            )
-        }
-    }
-
-    fun closeGroupEditor() {
-        if (_state.value.groupBusy) return
-        _state.update {
-            it.copy(groupEditorVisible = false, groupEditorTarget = null, groupError = null)
-        }
-    }
-
-    fun saveGroup(groupId: String?, name: String, deviceIds: List<String>) {
-        if (_state.value.groupBusy) return
-        val client = api ?: return
-        _state.update { it.copy(groupBusy = true, groupError = null) }
-        connectionScope.launch {
-            try {
-                val saved = if (groupId == null) {
-                    client.createGroup(name, deviceIds)
-                } else {
-                    client.updateGroup(groupId, name, deviceIds)
-                }
-                _state.update { current ->
-                    val exists = current.groups.any { it.id == saved.id }
-                    current.copy(
-                        groups = if (exists) {
-                            current.groups.map { if (it.id == saved.id) saved else it }
-                        } else {
-                            current.groups + saved
-                        },
-                        groupEditorVisible = false,
-                        groupEditorTarget = null,
-                        groupBusy = false,
-                        groupError = null,
-                        error = null,
-                    )
-                }
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
-                    refreshGroups()
-                }
-                _state.update { it.copy(groupBusy = false, groupError = t.readableMessage()) }
-            }
-        }
-    }
-
-    fun requestGroupRemoval(groupId: String) {
-        _state.update { it.copy(groupRemovalTargetId = groupId) }
-    }
-
-    fun dismissGroupRemoval() {
-        _state.update { it.copy(groupRemovalTargetId = null) }
-    }
+    /**
+     * Saves the group and completes with null, or with a user-readable error.
+     * The caller owns the sheet and its busy state.
+     */
+    fun saveGroup(
+        groupId: String?,
+        name: String,
+        deviceIds: List<String>,
+    ): Deferred<String?> = runWrite { repository.saveGroup(groupId, name, deviceIds) }
 
     fun removeGroup(groupId: String) {
-        val client = api ?: return
-        _state.update { it.copy(groupRemovalTargetId = null) }
-        connectionScope.launch {
-            try {
-                client.removeGroup(groupId)
-                dropGroup(groupId)
-                _state.update { it.copy(error = null) }
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
-                    dropGroup(groupId)
-                } else {
-                    _state.update { it.copy(error = t.readableMessage()) }
-                }
-            }
-        }
+        launchRemove { repository.removeGroup(groupId) }
     }
 
     fun sendGroupCommand(groupId: String, action: CommandAction) {
         if (_state.value.pendingGroupId != null) return
-        val client = api ?: return
-        _state.update { it.copy(pendingGroupId = groupId, groupNotice = null) }
-        connectionScope.launch {
+        val epoch = connectionEpoch
+        _state.update { it.copy(pendingGroupId = groupId) }
+        viewModelScope.launch {
             try {
-                val result = client.sendGroupCommand(
-                    groupId = groupId,
-                    action = action,
-                    idempotencyKey = newIdempotencyKey(),
+                val result = repository.sendGroupCommand(groupId, action)
+                if (epoch != connectionEpoch) return@launch
+                result.fold(
+                    onSuccess = { dispatched ->
+                        postMessage(
+                            buildString {
+                                append("已下发 ")
+                                append(dispatched.dispatchedCount)
+                                append(" 台")
+                                if (dispatched.failedCount > 0) {
+                                    append("，")
+                                    append(dispatched.failedCount)
+                                    append(" 台失败（")
+                                    append(dispatched.failures.joinToString { it.code })
+                                    append("）")
+                                }
+                            },
+                        )
+                    },
+                    onFailure = { error ->
+                        postMessage(error.readableMessage())
+                        if (error.isGone()) startRefresh(force = true)
+                    },
                 )
-                val notice = buildString {
-                    append("已下发 ")
-                    append(result.dispatchedCount)
-                    append(" 台")
-                    if (result.failedCount > 0) {
-                        append("，")
-                        append(result.failedCount)
-                        append(" 台失败（")
-                        append(result.failures.joinToString { it.code })
-                        append("）")
-                    }
-                }
-                _state.update { it.copy(groupNotice = notice, error = null) }
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                _state.update { it.copy(error = t.readableMessage()) }
-                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
-                    refreshGroups()
-                }
             } finally {
-                if (api === client) {
+                if (epoch == connectionEpoch) {
                     _state.update { it.copy(pendingGroupId = null) }
                 }
             }
         }
     }
 
-    fun openScheduleEditor(scheduleId: String? = null) {
-        val target = scheduleId?.let { id -> _state.value.schedules.firstOrNull { it.id == id } }
-        if (scheduleId != null && target == null) return
-        _state.update {
-            it.copy(
-                scheduleEditorVisible = true,
-                scheduleEditorTarget = target,
-                scheduleError = null,
-            )
-        }
-    }
-
-    fun closeScheduleEditor() {
-        if (_state.value.scheduleBusy) return
-        _state.update {
-            it.copy(
-                scheduleEditorVisible = false,
-                scheduleEditorTarget = null,
-                scheduleError = null,
-            )
-        }
-    }
-
+    /**
+     * Saves the schedule and completes with null, or with a user-readable
+     * error. The caller owns the sheet and its busy state.
+     */
     fun saveSchedule(
         scheduleId: String?,
         name: String,
@@ -394,138 +239,48 @@ internal class AppViewModel(
         timeZone: String,
         startsAtEpochMs: Long,
         enabled: Boolean,
-    ) {
-        if (_state.value.scheduleBusy) return
-        val client = api ?: return
-        val existing = scheduleId?.let { id -> _state.value.schedules.firstOrNull { it.id == id } }
-        val update = existing?.let {
-            UpdateScheduleRequest(
-                name = name.takeIf { value -> value != it.name },
-                targetType = targetType.takeIf { value -> value != it.targetType },
-                targetId = targetId.takeIf { value -> value != it.targetId },
-                action = action.takeIf { value -> value != it.action },
-                rrule = rrule.takeIf { value -> value != it.rrule },
-                timeZone = timeZone.takeIf { value -> value != it.timeZone },
-                startsAtEpochMs = startsAtEpochMs.takeIf { value -> value != it.startsAtEpochMs },
-                enabled = enabled.takeIf { value -> value != it.enabled },
-            )
-        }
-        if (update != null && update.isEmpty()) {
-            closeScheduleEditor()
-            return
-        }
-        _state.update { it.copy(scheduleBusy = true, scheduleError = null) }
-        connectionScope.launch {
-            try {
-                val saved = if (scheduleId == null) {
-                    client.createSchedule(
-                        CreateScheduleRequest(
-                            name = name,
-                            targetType = targetType,
-                            targetId = targetId,
-                            action = action,
-                            rrule = rrule,
-                            timeZone = timeZone,
-                            startsAtEpochMs = startsAtEpochMs,
-                            enabled = enabled,
-                        ),
-                    )
-                } else {
-                    client.updateSchedule(scheduleId, update ?: UpdateScheduleRequest())
-                }
-                _state.update { current ->
-                    val exists = current.schedules.any { it.id == saved.id }
-                    current.copy(
-                        schedules = if (exists) {
-                            current.schedules.map { if (it.id == saved.id) saved else it }
-                        } else {
-                            current.schedules + saved
-                        },
-                        scheduleEditorVisible = false,
-                        scheduleEditorTarget = null,
-                        scheduleBusy = false,
-                        scheduleError = null,
-                        error = null,
-                    )
-                }
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
-                    refreshSchedules()
-                }
-                _state.update { it.copy(scheduleBusy = false, scheduleError = t.readableMessage()) }
-            }
-        }
+    ): Deferred<String?> = runWrite {
+        repository.saveSchedule(
+            scheduleId = scheduleId,
+            name = name,
+            targetType = targetType,
+            targetId = targetId,
+            action = action,
+            rrule = rrule,
+            timeZone = timeZone,
+            startsAtEpochMs = startsAtEpochMs,
+            enabled = enabled,
+        )
     }
 
     fun setScheduleEnabled(scheduleId: String, enabled: Boolean) {
         if (_state.value.pendingScheduleId != null) return
-        val client = api ?: return
+        val epoch = connectionEpoch
         _state.update { it.copy(pendingScheduleId = scheduleId) }
-        connectionScope.launch {
+        viewModelScope.launch {
             try {
-                val saved = client.updateSchedule(
-                    scheduleId,
-                    UpdateScheduleRequest(enabled = enabled),
-                )
-                _state.update { current ->
-                    current.copy(
-                        schedules = current.schedules.map {
-                            if (it.id == saved.id) saved else it
-                        },
-                        error = null,
-                    )
-                }
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                _state.update { it.copy(error = t.readableMessage()) }
-                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
-                    refreshSchedules()
+                val error = repository.setScheduleEnabled(scheduleId, enabled).exceptionOrNull()
+                if (epoch == connectionEpoch && error != null) {
+                    postMessage(error.readableMessage())
+                    if (error.isGone()) startRefresh(force = true)
                 }
             } finally {
-                if (api === client) {
+                if (epoch == connectionEpoch) {
                     _state.update { it.copy(pendingScheduleId = null) }
                 }
             }
         }
     }
 
-    fun requestScheduleRemoval(scheduleId: String) {
-        _state.update { it.copy(scheduleRemovalTargetId = scheduleId) }
-    }
-
-    fun dismissScheduleRemoval() {
-        _state.update { it.copy(scheduleRemovalTargetId = null) }
-    }
-
     fun removeSchedule(scheduleId: String) {
-        val client = api ?: return
-        _state.update { it.copy(scheduleRemovalTargetId = null) }
-        connectionScope.launch {
-            try {
-                client.removeSchedule(scheduleId)
-                dropSchedule(scheduleId)
-                _state.update { it.copy(error = null) }
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                if (t is ClientApiException && (t.status == 404 || t.status == 410)) {
-                    dropSchedule(scheduleId)
-                } else {
-                    _state.update { it.copy(error = t.readableMessage()) }
-                }
-            }
-        }
-    }
-
-    fun dismissGroupNotice() {
-        _state.update { it.copy(groupNotice = null) }
+        launchRemove { repository.removeSchedule(scheduleId) }
     }
 
     fun openLearning() {
-        _state.update {
+        updateLearning {
             it.copy(
-                learningVisible = true,
-                learningError = null,
+                visible = true,
+                error = null,
                 testMessage = null,
                 completedDeviceName = null,
             )
@@ -533,326 +288,274 @@ internal class AppViewModel(
         if (_state.value.gatewayOnline) {
             maybeStartLearning()
         } else {
-            // Refresh health now instead of waiting for the 30s poll; the
-            // gateway may already be back and the session can start at once.
-            val client = api ?: return
-            connectionScope.launch {
-                runCatching { client.health() }.onSuccess(::applyHealth)
+            // Refresh health now instead of waiting for a poll; the gateway may
+            // already be back and the session can start at once.
+            viewModelScope.launch {
+                ignoreFailure { repository.refreshHealth() }
             }
         }
     }
 
     fun closeLearning() {
-        val session = _state.value.learning
+        val session = _state.value.learning.session
         learningPollJob?.cancel()
-        _state.update {
-            it.copy(
-                learningVisible = false,
-                learningId = null,
-                learning = null,
-                learningError = null,
-                testMessage = null,
-                completedDeviceName = null,
-            )
-        }
+        learningPollJob = null
+        _state.update { it.copy(learning = LearningUiState()) }
         if (session != null && session.state !in TERMINAL_LEARNING_STATES) {
-            val client = api ?: return
-            connectionScope.launch {
-                sessionMutex.withLock {
-                    runCatching { client.cancelLearning(session.id) }
-                }
+            viewModelScope.launch {
+                ignoreFailure { repository.cancelLearning(session.id) }
             }
         }
     }
 
     fun startLearning() {
-        val client = api ?: return
-        if (_state.value.learningBusy) return
-        _state.update { it.copy(learningBusy = true, learningError = null) }
-        connectionScope.launch {
+        if (_state.value.learning.busy) return
+        val epoch = connectionEpoch
+        updateLearning { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
             try {
-                sessionMutex.withLock {
-                    val session = client.startLearning()
-                    if (_state.value.learningVisible) {
-                        _state.update {
-                            it.copy(
-                                learning = session,
-                                learningId = session.id,
-                                testMessage = null,
-                                completedDeviceName = null,
-                            )
-                        }
-                        startLearningPoll(session.id)
-                    } else {
-                        // Sheet dismissed while the request was in flight.
-                        runCatching { client.cancelLearning(session.id) }
+                val session = repository.startLearning()
+                if (epoch != connectionEpoch) return@launch
+                if (_state.value.learning.visible) {
+                    updateLearning {
+                        it.copy(
+                            session = session,
+                            pollingSessionId = session.id,
+                            testMessage = null,
+                            completedDeviceName = null,
+                        )
                     }
+                    startLearningPoll(session.id)
+                } else {
+                    // Sheet dismissed while the request was in flight.
+                    ignoreFailure { repository.cancelLearning(session.id) }
                 }
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
-                if (_state.value.learningVisible) {
-                    _state.update { it.copy(learningError = t.readableMessage()) }
+                if (epoch == connectionEpoch && _state.value.learning.visible) {
+                    updateLearning { it.copy(error = t.readableMessage()) }
                 }
             } finally {
-                if (api === client) {
-                    _state.update { it.copy(learningBusy = false) }
+                if (epoch == connectionEpoch) {
+                    updateLearning { it.copy(busy = false) }
                 }
             }
         }
     }
 
     fun acceptCandidate(candidate: LearningCandidate) {
-        val session = _state.value.learning ?: return
-        if (_state.value.learningBusy) return
-        val client = api ?: return
-        _state.update { it.copy(learningBusy = true) }
-        connectionScope.launch {
+        val session = _state.value.learning.session ?: return
+        if (_state.value.learning.busy) return
+        val epoch = connectionEpoch
+        updateLearning { it.copy(busy = true) }
+        viewModelScope.launch {
             try {
-                val updated = client.acceptCandidate(session.id, candidate.id)
-                _state.update { it.copy(learning = updated, learningError = null) }
+                val updated = repository.acceptCandidate(session.id, candidate.id)
+                if (epoch == connectionEpoch) {
+                    updateLearning { it.copy(session = updated, error = null) }
+                }
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
-                _state.update { it.copy(learningError = t.readableMessage()) }
+                if (epoch == connectionEpoch) {
+                    updateLearning { it.copy(error = t.readableMessage()) }
+                }
             } finally {
-                if (api === client) {
-                    _state.update { it.copy(learningBusy = false) }
+                if (epoch == connectionEpoch) {
+                    updateLearning { it.copy(busy = false) }
                 }
             }
         }
     }
 
     fun rescan() {
-        val session = _state.value.learning ?: return
-        if (_state.value.learningBusy) return
-        val client = api ?: return
-        _state.update { it.copy(learningBusy = true) }
-        connectionScope.launch {
+        val session = _state.value.learning.session ?: return
+        if (_state.value.learning.busy) return
+        val epoch = connectionEpoch
+        updateLearning { it.copy(busy = true) }
+        viewModelScope.launch {
             try {
-                val updated = client.rescan(session.id)
-                _state.update {
-                    it.copy(learning = updated, learningError = null, testMessage = null)
+                val updated = repository.rescan(session.id)
+                if (epoch == connectionEpoch) {
+                    updateLearning {
+                        it.copy(session = updated, error = null, testMessage = null)
+                    }
                 }
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
-                _state.update { it.copy(learningError = t.readableMessage()) }
+                if (epoch == connectionEpoch) {
+                    updateLearning { it.copy(error = t.readableMessage()) }
+                }
             } finally {
-                if (api === client) {
-                    _state.update { it.copy(learningBusy = false) }
+                if (epoch == connectionEpoch) {
+                    updateLearning { it.copy(busy = false) }
                 }
             }
         }
     }
 
     fun test(slot: LearningSlot) {
-        val session = _state.value.learning ?: return
-        if (_state.value.learningBusy) return
-        val client = api ?: return
-        _state.update { it.copy(learningBusy = true) }
-        connectionScope.launch {
+        val session = _state.value.learning.session ?: return
+        if (_state.value.learning.busy) return
+        val epoch = connectionEpoch
+        updateLearning { it.copy(busy = true) }
+        viewModelScope.launch {
             try {
-                client.testLearning(session.id, slot)
-                _state.update {
-                    it.copy(
-                        testMessage = if (slot == LearningSlot.TURN_ON) {
-                            "已试发开码，请观察设备是否动作。"
-                        } else {
-                            "已试发关码，请观察设备是否停止。"
-                        },
-                        learningError = null,
-                    )
+                repository.testLearning(session.id, slot)
+                if (epoch == connectionEpoch) {
+                    updateLearning {
+                        it.copy(
+                            testMessage = if (slot == LearningSlot.TURN_ON) {
+                                "已试发开码，请观察设备是否动作。"
+                            } else {
+                                "已试发关码，请观察设备是否停止。"
+                            },
+                            error = null,
+                        )
+                    }
                 }
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
-                _state.update { it.copy(learningError = t.readableMessage()) }
+                if (epoch == connectionEpoch) {
+                    updateLearning { it.copy(error = t.readableMessage()) }
+                }
             } finally {
-                if (api === client) {
-                    _state.update { it.copy(learningBusy = false) }
+                if (epoch == connectionEpoch) {
+                    updateLearning { it.copy(busy = false) }
                 }
             }
         }
     }
 
     fun confirmLearning(name: String, location: String) {
-        val session = _state.value.learning ?: return
-        if (_state.value.learningBusy) return
-        val client = api ?: return
-        _state.update { it.copy(learningBusy = true) }
-        connectionScope.launch {
+        val session = _state.value.learning.session ?: return
+        if (_state.value.learning.busy) return
+        val epoch = connectionEpoch
+        updateLearning { it.copy(busy = true) }
+        viewModelScope.launch {
             try {
-                val confirmation = client.confirmLearning(session.id, name, location)
+                val confirmation = repository.confirmLearning(session.id, name, location)
                 learningPollJob?.cancel()
-                _state.update {
-                    it.copy(
-                        learning = confirmation.session,
-                        learningId = null,
-                        completedDeviceName = confirmation.device.name,
-                        learningError = null,
-                    )
+                learningPollJob = null
+                if (epoch == connectionEpoch) {
+                    updateLearning {
+                        it.copy(
+                            session = confirmation.session,
+                            pollingSessionId = null,
+                            completedDeviceName = confirmation.device.name,
+                            error = null,
+                        )
+                    }
                 }
-                val devices = client.devices()
-                _state.update { it.copy(devices = devices) }
-                val health = client.health()
-                _state.update { it.copy(health = health) }
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
-                _state.update { it.copy(learningError = t.readableMessage()) }
+                if (epoch == connectionEpoch) {
+                    updateLearning { it.copy(error = t.readableMessage()) }
+                }
             } finally {
-                if (api === client) {
-                    _state.update { it.copy(learningBusy = false) }
+                if (epoch == connectionEpoch) {
+                    updateLearning { it.copy(busy = false) }
                 }
             }
         }
     }
 
     override fun onCleared() {
-        connectionJob.cancel()
-        api?.close()
+        repository.close()
+        _messages.close()
     }
 
     private fun connect(url: String, token: String) {
-        connectionJob.cancel()
-        connectionJob = SupervisorJob(viewModelScope.coroutineContext[Job])
-        connectionScope = CoroutineScope(viewModelScope.coroutineContext + connectionJob)
+        connectionEpoch += 1
+        learningPollJob?.cancel()
         learningPollJob = null
-        api?.close()
-        val client = Esp32Api(baseUrl = url, token = token)
-        api = client
+        refreshJob?.cancel()
+        refreshJob = null
+        repository.connect(url, token)
         _state.update {
             it.copy(
                 serverUrl = url,
                 apiToken = token,
                 health = null,
-                devices = emptyList(),
-                groups = emptyList(),
-                schedules = emptyList(),
-                loading = true,
+                refresh = it.refresh.copy(running = true, error = null),
                 pendingDeviceId = null,
-                error = null,
-                detailDeviceId = null,
-                editingDeviceId = null,
-                editBusy = false,
-                editError = null,
-                removalTargetId = null,
                 pendingGroupId = null,
-                groupNotice = null,
-                groupEditorVisible = false,
-                groupEditorTarget = null,
-                groupBusy = false,
-                groupError = null,
-                groupRemovalTargetId = null,
                 pendingScheduleId = null,
-                scheduleEditorVisible = false,
-                scheduleEditorTarget = null,
-                scheduleBusy = false,
-                scheduleError = null,
-                scheduleRemovalTargetId = null,
-                learningVisible = false,
-                learning = null,
-                learningId = null,
-                learningBusy = false,
-                learningError = null,
-                testMessage = null,
-                completedDeviceName = null,
+                learning = LearningUiState(),
             )
         }
-        loadAll(client)
-        startPolling(client)
+        viewModelScope.launch { pull() }
     }
 
-    private fun loadAll(client: Esp32Api) {
-        connectionScope.launch {
-            try {
-                val health = client.health()
-                _state.update { it.copy(health = health) }
-                val devices = client.devices()
-                val groups = client.groups().groups
-                val schedules = client.schedules().schedules
-                _state.update {
-                    it.copy(
-                        devices = devices,
-                        groups = groups,
-                        schedules = schedules,
-                        error = null,
-                        loading = false,
-                    )
-                }
+    private fun startRefresh(force: Boolean) {
+        if (!force && refreshJob?.isActive == true) return
+        refreshJob?.cancel()
+        refreshJob = viewModelScope.launch { pull() }
+    }
+
+    private suspend fun pull() {
+        _state.update { it.copy(refresh = it.refresh.copy(running = true, error = null)) }
+        repository.refresh().fold(
+            onSuccess = {
+                _state.update { it.copy(refresh = it.refresh.copy(running = false, error = null)) }
                 maybeStartLearning()
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                _state.update { it.copy(error = t.readableMessage(), loading = false) }
-            }
-        }
-    }
-
-    private fun refreshDevices() {
-        val client = api ?: return
-        connectionScope.launch {
-            try {
-                val devices = client.devices()
-                _state.update { it.copy(devices = devices) }
-                val health = client.health()
-                applyHealth(health)
-            } catch (t: Throwable) {
-                if (t is CancellationException) throw t
-                _state.update { it.copy(error = t.readableMessage()) }
-            }
-        }
-    }
-
-    private fun startPolling(client: Esp32Api) {
-        connectionScope.launch {
-            while (isActive) {
-                delay(30_000)
-                // The contract has no event stream: every view refreshes from
-                // the same periodic snapshot. A failed poll is transient and
-                // keeps the previous values.
-                runCatching { client.health() }.onSuccess(::applyHealth)
-                runCatching { client.devices() }.onSuccess { devices ->
-                    _state.update { it.copy(devices = devices) }
+            },
+            onFailure = { t ->
+                val message = t.readableMessage()
+                val hasSnapshot = _state.value.refresh.hasSnapshot
+                _state.update {
+                    it.copy(refresh = it.refresh.copy(running = false, error = message))
                 }
-                runCatching { client.groups() }.onSuccess { response ->
-                    _state.update { it.copy(groups = response.groups) }
-                }
-                runCatching { client.schedules() }.onSuccess { response ->
-                    _state.update { it.copy(schedules = response.schedules) }
-                }
+                // With a snapshot the content stays visible; report the
+                // failure through the snackbar instead of a full-screen state.
+                if (hasSnapshot) postMessage(message)
+            },
+        )
+    }
+
+    /**
+     * Runs a write and completes with null, or with a user-readable error.
+     * A write to a resource that disappeared also refreshes the snapshot.
+     */
+    private fun runWrite(block: suspend () -> Result<Unit>): Deferred<String?> {
+        val epoch = connectionEpoch
+        return viewModelScope.async {
+            val error = block().exceptionOrNull()
+            if (epoch != connectionEpoch) return@async null
+            if (error == null) return@async null
+            if (error.isGone()) {
+                postMessage(error.readableMessage())
+                startRefresh(force = true)
             }
+            error.readableMessage()
         }
     }
 
-    private fun refreshGroups() {
-        val client = api ?: return
-        connectionScope.launch {
-            runCatching { client.groups() }.onSuccess { response ->
-                _state.update { it.copy(groups = response.groups) }
-            }
-        }
-    }
-
-    private fun refreshSchedules() {
-        val client = api ?: return
-        connectionScope.launch {
-            runCatching { client.schedules() }.onSuccess { response ->
-                _state.update { it.copy(schedules = response.schedules) }
+    private fun launchRemove(block: suspend () -> Result<Unit>) {
+        val epoch = connectionEpoch
+        viewModelScope.launch {
+            val error = block().exceptionOrNull()
+            if (epoch != connectionEpoch) return@launch
+            when {
+                error == null || error.isGone() -> startRefresh(force = true)
+                else -> postMessage(error.readableMessage())
             }
         }
     }
 
     private fun startLearningPoll(sessionId: String) {
-        val client = api ?: return
         learningPollJob?.cancel()
-        learningPollJob = connectionScope.launch {
+        val epoch = connectionEpoch
+        learningPollJob = viewModelScope.launch {
             while (isActive) {
                 delay(1_000)
                 try {
-                    val session = client.learning(sessionId)
-                    _state.update { it.copy(learning = session) }
+                    val session = repository.learning(sessionId)
+                    if (epoch != connectionEpoch) return@launch
+                    updateLearning { it.copy(session = session) }
                     if (session.state in TERMINAL_LEARNING_STATES) {
-                        _state.update { it.copy(learningId = null) }
+                        updateLearning { it.copy(pollingSessionId = null) }
                         if (session.state == LearningState.COMPLETED) {
-                            runCatching { client.devices() }.onSuccess { devices ->
-                                _state.update { it.copy(devices = devices) }
-                            }
+                            startRefresh(force = true)
                         }
                         break
                     }
@@ -860,17 +563,8 @@ internal class AppViewModel(
                     if (t is CancellationException) throw t
                     if (t is ClientApiException && t.status == 404) {
                         // Sessions live in server memory and die with the process.
-                        _state.update {
-                            it.copy(
-                                learningId = null,
-                                learning = null,
-                                learningVisible = false,
-                                learningError = null,
-                                testMessage = null,
-                                completedDeviceName = null,
-                                error = "学习会话已失效，请重新开始",
-                            )
-                        }
+                        _state.update { it.copy(learning = LearningUiState()) }
+                        postMessage("学习会话已失效，请重新开始")
                         break
                     }
                     // A failed poll is transient: keep polling and let the
@@ -882,99 +576,37 @@ internal class AppViewModel(
 
     private fun maybeStartLearning() {
         val current = _state.value
-        if (current.learningVisible &&
+        if (current.learning.visible &&
             current.gatewayOnline &&
-            current.learning == null &&
-            current.learningId == null &&
-            !current.learningBusy
+            current.learning.session == null &&
+            current.learning.pollingSessionId == null &&
+            !current.learning.busy
         ) {
             startLearning()
         }
     }
 
-    private fun applyHealth(health: HealthResponse) {
-        _state.update { it.copy(health = health) }
-        maybeStartLearning()
+    private fun updateLearning(transform: (LearningUiState) -> LearningUiState) {
+        _state.update { it.copy(learning = transform(it.learning)) }
     }
 
-    private fun dropDevice(deviceId: String) {
-        _state.update { current ->
-            val scheduleEditorRemoved = current.scheduleEditorTarget?.let {
-                it.targetType == ScheduleTarget.DEVICE && it.targetId == deviceId
-            } == true
-            current.copy(
-                devices = current.devices.filterNot { it.id == deviceId },
-                groups = current.groups.map { group ->
-                    if (deviceId in group.deviceIds) {
-                        group.copy(deviceIds = group.deviceIds.filterNot { it == deviceId })
-                    } else {
-                        group
-                    }
-                },
-                // The server cascades device-targeted schedules on delete.
-                schedules = current.schedules.filterNot {
-                    it.targetType == ScheduleTarget.DEVICE && it.targetId == deviceId
-                },
-                detailDeviceId = current.detailDeviceId?.takeUnless { it == deviceId },
-                editingDeviceId = current.editingDeviceId?.takeUnless { it == deviceId },
-                removalTargetId = current.removalTargetId?.takeUnless { it == deviceId },
-                scheduleEditorVisible =
-                    if (scheduleEditorRemoved) false else current.scheduleEditorVisible,
-                scheduleEditorTarget =
-                    if (scheduleEditorRemoved) null else current.scheduleEditorTarget,
-                scheduleError = if (scheduleEditorRemoved) null else current.scheduleError,
-            )
-        }
-    }
-
-    private fun dropGroup(groupId: String) {
-        _state.update { current ->
-            val editingRemoved = current.groupEditorTarget?.id == groupId
-            // The server cascades group-targeted schedules on delete; an open
-            // editor for one of them has no target left to save.
-            val scheduleEditorRemoved = current.scheduleEditorTarget?.let {
-                it.targetType == ScheduleTarget.GROUP && it.targetId == groupId
-            } == true
-            current.copy(
-                groups = current.groups.filterNot { it.id == groupId },
-                schedules = current.schedules.filterNot {
-                    it.targetType == ScheduleTarget.GROUP && it.targetId == groupId
-                },
-                groupRemovalTargetId = current.groupRemovalTargetId?.takeUnless { it == groupId },
-                groupEditorVisible = if (editingRemoved) false else current.groupEditorVisible,
-                groupEditorTarget = current.groupEditorTarget?.takeUnless { it.id == groupId },
-                groupError = if (editingRemoved) null else current.groupError,
-                scheduleEditorVisible =
-                    if (scheduleEditorRemoved) false else current.scheduleEditorVisible,
-                scheduleEditorTarget =
-                    if (scheduleEditorRemoved) null else current.scheduleEditorTarget,
-                scheduleError = if (scheduleEditorRemoved) null else current.scheduleError,
-            )
-        }
-    }
-
-    private fun dropSchedule(scheduleId: String) {
-        _state.update { current ->
-            val editingRemoved = current.scheduleEditorTarget?.id == scheduleId
-            current.copy(
-                schedules = current.schedules.filterNot { it.id == scheduleId },
-                scheduleRemovalTargetId =
-                    current.scheduleRemovalTargetId?.takeUnless { it == scheduleId },
-                scheduleEditorVisible =
-                    if (editingRemoved) false else current.scheduleEditorVisible,
-                scheduleEditorTarget =
-                    current.scheduleEditorTarget?.takeUnless { it.id == scheduleId },
-                scheduleError = if (editingRemoved) null else current.scheduleError,
-            )
-        }
+    private fun postMessage(message: String) {
+        _messages.trySend(message)
     }
 }
 
-private fun UpdateScheduleRequest.isEmpty(): Boolean =
-    name == null && targetType == null && targetId == null && action == null &&
-        rrule == null && timeZone == null && startsAtEpochMs == null && enabled == null
+private suspend fun ignoreFailure(block: suspend () -> Unit) {
+    try {
+        block()
+    } catch (t: Throwable) {
+        if (t is CancellationException) throw t
+    }
+}
 
 private fun Throwable.readableMessage(): String {
+    if (this is NotConnectedException) {
+        return "尚未连接服务端"
+    }
     if (this is ClientApiException) {
         if (code == "unauthorized") {
             return "访问令牌无效或缺失，请在设置中更新" +

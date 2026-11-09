@@ -1,17 +1,21 @@
 package com.esp32.control.gui.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -21,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.esp32.control.gui.resources.Res
 import com.esp32.control.gui.resources.ic_add
@@ -87,6 +92,20 @@ internal fun ScheduleIcon(modifier: Modifier = Modifier) =
     AppIcon(Res.drawable.ic_schedule, modifier)
 
 @Composable
+internal fun DeleteDialogIcon() {
+    Surface(
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        modifier = Modifier.size(48.dp),
+    ) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            DeleteIcon(Modifier.size(22.dp))
+        }
+    }
+}
+
+@Composable
 internal fun StatusChip(text: String, tone: StatusTone) {
     val container = when (tone) {
         StatusTone.Active -> MaterialTheme.colorScheme.primaryContainer
@@ -145,4 +164,32 @@ internal fun ErrorText(message: String, modifier: Modifier = Modifier) {
         color = MaterialTheme.colorScheme.error,
         modifier = modifier,
     )
+}
+
+@Composable
+internal fun CacheErrorState(
+    message: String,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 32.dp, vertical = 72.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text("无法加载数据", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(16.dp))
+        Button(onClick = onRetry, shape = CircleShape) {
+            Text("重试")
+        }
+    }
 }

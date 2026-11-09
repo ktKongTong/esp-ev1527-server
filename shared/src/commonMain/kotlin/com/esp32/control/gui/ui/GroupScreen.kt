@@ -1,6 +1,7 @@
 package com.esp32.control.gui.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -13,9 +14,13 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items as listItems
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
@@ -30,11 +35,17 @@ import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -42,11 +53,16 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.esp32.control.contract.CommandAction
 import com.esp32.control.contract.Device
 import com.esp32.control.contract.Group
 import com.esp32.control.contract.HealthResponse
+import com.esp32.control.gui.AppUiState
+import com.esp32.control.gui.AppViewModel
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.launch
 
 @Composable
 internal fun GroupHeader(health: HealthResponse?) {
@@ -185,26 +201,58 @@ internal fun EmptyGroups(onCreate: () -> Unit) {
     }
 }
 
+private val stringSetSaver: Saver<Set<String>, ArrayList<String>> = Saver(
+    save = { ArrayList(it) },
+    restore = { it.toSet() },
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun GroupEditorSheet(
     group: Group?,
     devices: List<Device>,
-    busy: Boolean,
-    errorText: String?,
-    onSave: (String, List<String>) -> Unit,
+    onSave: (String, List<String>) -> Deferred<String?>,
     onRemove: (() -> Unit)?,
     onDismiss: () -> Unit,
 ) {
-    var name by remember(group?.id) { mutableStateOf(group?.name.orEmpty()) }
-    var selected by remember(group?.id) {
+    var name by rememberSaveable(group?.id) { mutableStateOf(group?.name.orEmpty()) }
+    var selected by rememberSaveable(group?.id, stateSaver = stringSetSaver) {
         mutableStateOf(group?.deviceIds?.toSet() ?: emptySet())
     }
+    var busy by remember { mutableStateOf(false) }
+    var errorText by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
     val sheetState = rememberBottomSheetState(
         initialValue = SheetValue.Hidden,
         enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
     )
     val canSave = name.isNotBlank() && !busy
+
+    // Buttons must wait for the hide animation before the caller removes the
+    // sheet from composition; gesture dismissal arrives through onDismissRequest.
+    fun dismiss() {
+        scope.launch { sheetState.hide() }.invokeOnCompletion {
+            if (!sheetState.isVisible) onDismiss()
+        }
+    }
+
+    fun submit() {
+        if (busy) return
+        busy = true
+        errorText = null
+        scope.launch {
+            val message = try {
+                onSave(name.trim(), selected.toList()).await()
+            } finally {
+                busy = false
+            }
+            if (message == null) {
+                dismiss()
+            } else {
+                errorText = message
+            }
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = { if (!busy) onDismiss() },
@@ -227,7 +275,7 @@ internal fun GroupEditorSheet(
                     modifier = Modifier.weight(1f),
                 )
                 IconButton(
-                    onClick = onDismiss,
+                    onClick = ::dismiss,
                     enabled = !busy,
                     modifier = Modifier.semantics { contentDescription = "关闭" },
                 ) {
@@ -300,7 +348,7 @@ internal fun GroupEditorSheet(
 
             Spacer(Modifier.height(16.dp))
             Button(
-                onClick = { onSave(name.trim(), selected.toList()) },
+                onClick = { submit() },
                 enabled = canSave,
                 shape = CircleShape,
                 modifier = Modifier
@@ -328,3 +376,170 @@ internal fun GroupEditorSheet(
         }
     }
 }
+
+/** Group-domain sheet and dialog state, owned by the app shell for the add action. */
+@Stable
+internal class GroupScreenState(
+    editorOpen: Boolean = false,
+    editorId: String? = null,
+    removalId: String? = null,
+) {
+    var editorOpen by mutableStateOf(editorOpen)
+        private set
+    var editorId by mutableStateOf(editorId)
+        private set
+    var removalId by mutableStateOf(removalId)
+        private set
+
+    fun openEditor(groupId: String?) {
+        editorOpen = true
+        editorId = groupId
+    }
+
+    fun closeEditor() {
+        editorOpen = false
+        editorId = null
+    }
+
+    fun requestRemoval(groupId: String) {
+        removalId = groupId
+    }
+
+    fun dismissRemoval() {
+        removalId = null
+    }
+
+    fun closeAll() {
+        closeEditor()
+        dismissRemoval()
+    }
+}
+
+private val GroupScreenStateSaver: Saver<GroupScreenState, Any> = listSaver(
+    save = { listOf(if (it.editorOpen) "1" else "0", it.editorId.orEmpty(), it.removalId.orEmpty()) },
+    restore = {
+        GroupScreenState(
+            editorOpen = it.getOrNull(0) == "1",
+            editorId = it.getOrNull(1).orNullIfEmpty(),
+            removalId = it.getOrNull(2).orNullIfEmpty(),
+        )
+    },
+)
+
+@Composable
+internal fun rememberGroupScreenState(): GroupScreenState =
+    rememberSaveable(saver = GroupScreenStateSaver) { GroupScreenState() }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun GroupScreen(
+    state: AppUiState,
+    viewModel: AppViewModel,
+    screen: GroupScreenState,
+    groups: List<Group>,
+    devices: List<Device>,
+    horizontalPadding: Dp,
+) {
+    PullToRefreshBox(
+        isRefreshing = state.refresh.running,
+        onRefresh = viewModel::refresh,
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .widthIn(max = 1120.dp)
+                .fillMaxSize(),
+            contentPadding = PaddingValues(
+                start = horizontalPadding,
+                end = horizontalPadding,
+                top = 8.dp,
+                bottom = 24.dp,
+            ),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            item { GroupHeader(health = state.health) }
+
+            when {
+                groups.isEmpty() && state.loading -> item {
+                    LoadingDevices("正在同步分组…")
+                }
+
+                !state.refresh.hasSnapshot && state.refresh.error != null -> item {
+                    CacheErrorState(
+                        message = state.refresh.error.orEmpty(),
+                        onRetry = viewModel::refresh,
+                    )
+                }
+
+                groups.isEmpty() -> item {
+                    EmptyGroups(onCreate = { screen.openEditor(null) })
+                }
+
+                else -> listItems(groups, key = { it.id }) { group ->
+                    GroupCard(
+                        group = group,
+                        pending = state.pendingGroupId == group.id,
+                        gatewayOnline = state.gatewayOnline,
+                        onCommand = { action ->
+                            viewModel.sendGroupCommand(group.id, action)
+                        },
+                        onOpen = { screen.openEditor(group.id) },
+                    )
+                }
+            }
+        }
+    }
+
+    val editorTarget = screen.editorId?.let { id -> groups.firstOrNull { it.id == id } }
+    if (screen.editorOpen && (screen.editorId == null || editorTarget != null)) {
+        GroupEditorSheet(
+            group = editorTarget,
+            devices = devices,
+            onSave = { name, deviceIds ->
+                viewModel.saveGroup(editorTarget?.id, name, deviceIds)
+            },
+            onRemove = editorTarget?.let { group ->
+                { screen.requestRemoval(group.id) }
+            },
+            onDismiss = screen::closeEditor,
+        )
+    }
+
+    screen.removalId?.let { id -> groups.firstOrNull { it.id == id } }?.let { group ->
+        AlertDialog(
+            onDismissRequest = screen::dismissRemoval,
+            shape = AppShapes.Dialog,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            icon = { DeleteDialogIcon() },
+            title = { Text("删除分组？") },
+            text = {
+                Text(
+                    "将删除“${group.name}”。指向该分组的定时任务会一并删除；设备本身不受影响。",
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        screen.dismissRemoval()
+                        viewModel.removeGroup(group.id)
+                    },
+                    shape = CircleShape,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) {
+                    Text("删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = screen::dismissRemoval) {
+                    Text("取消")
+                }
+            },
+        )
+    }
+}
+
+private fun String?.orNullIfEmpty(): String? = this?.ifEmpty { null }

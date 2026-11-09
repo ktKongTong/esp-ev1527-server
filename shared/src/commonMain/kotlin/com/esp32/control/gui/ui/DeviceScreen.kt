@@ -20,9 +20,17 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingToolbarDefaults
@@ -31,20 +39,32 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.ToggleButton
 import androidx.compose.material3.ToggleButtonDefaults
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.esp32.control.contract.CommandAction
 import com.esp32.control.contract.Device
 import com.esp32.control.contract.GatewayState
 import com.esp32.control.contract.HealthResponse
+import com.esp32.control.gui.AppUiState
+import com.esp32.control.gui.AppViewModel
 import com.esp32.control.gui.resources.Res
 import com.esp32.control.gui.resources.ic_groups
 import com.esp32.control.gui.resources.ic_schedule
@@ -295,3 +315,223 @@ internal fun gatewayChipLabel(state: GatewayState?): String = when (state) {
     GatewayState.UNKNOWN -> "网关未知"
     null -> "未连接"
 }
+
+/**
+ * Device-domain sheet and dialog state. Owned by the app shell because the
+ * bottom bar's add action lives outside the pager; the device screen renders
+ * the surfaces themselves.
+ */
+@Stable
+internal class DeviceScreenState(
+    detailDeviceId: String? = null,
+    editingDeviceId: String? = null,
+    removalDeviceId: String? = null,
+) {
+    var detailDeviceId by mutableStateOf(detailDeviceId)
+        private set
+    var editingDeviceId by mutableStateOf(editingDeviceId)
+        private set
+    var removalDeviceId by mutableStateOf(removalDeviceId)
+        private set
+
+    fun showDetail(deviceId: String) {
+        detailDeviceId = deviceId
+    }
+
+    fun showEditor(deviceId: String) {
+        editingDeviceId = deviceId
+    }
+
+    fun requestRemoval(deviceId: String) {
+        removalDeviceId = deviceId
+    }
+
+    fun dismissDetail() {
+        detailDeviceId = null
+    }
+
+    fun dismissEditor() {
+        editingDeviceId = null
+    }
+
+    fun dismissRemoval() {
+        removalDeviceId = null
+    }
+
+    fun closeAll() {
+        detailDeviceId = null
+        editingDeviceId = null
+        removalDeviceId = null
+    }
+}
+
+private val DeviceScreenStateSaver: Saver<DeviceScreenState, Any> = listSaver(
+    save = {
+        listOf(
+            it.detailDeviceId.orEmpty(),
+            it.editingDeviceId.orEmpty(),
+            it.removalDeviceId.orEmpty(),
+        )
+    },
+    restore = {
+        DeviceScreenState(
+            detailDeviceId = it.getOrNull(0).orNullIfEmpty(),
+            editingDeviceId = it.getOrNull(1).orNullIfEmpty(),
+            removalDeviceId = it.getOrNull(2).orNullIfEmpty(),
+        )
+    },
+)
+
+@Composable
+internal fun rememberDeviceScreenState(): DeviceScreenState =
+    rememberSaveable(saver = DeviceScreenStateSaver) { DeviceScreenState() }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun DeviceScreen(
+    state: AppUiState,
+    viewModel: AppViewModel,
+    screen: DeviceScreenState,
+    devices: List<Device>,
+    columns: Int,
+    horizontalPadding: Dp,
+) {
+    PullToRefreshBox(
+        isRefreshing = state.refresh.running,
+        onRefresh = viewModel::refresh,
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(columns),
+            modifier = Modifier
+                .widthIn(max = 1120.dp)
+                .fillMaxSize(),
+            contentPadding = PaddingValues(
+                start = horizontalPadding,
+                end = horizontalPadding,
+                top = 8.dp,
+                bottom = 24.dp,
+            ),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                DeviceHeader(health = state.health)
+            }
+
+            when {
+                devices.isEmpty() && state.loading ->
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        LoadingDevices()
+                    }
+
+                !state.refresh.hasSnapshot && state.refresh.error != null ->
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        CacheErrorState(
+                            message = state.refresh.error.orEmpty(),
+                            onRetry = viewModel::refresh,
+                        )
+                    }
+
+                devices.isEmpty() ->
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        EmptyDevices(
+                            gatewayOnline = state.gatewayOnline,
+                            onLearn = viewModel::openLearning,
+                        )
+                    }
+
+                else -> items(devices, key = { it.id }) { device ->
+                    DeviceCard(
+                        device = device,
+                        pending = state.pendingDeviceId == device.id,
+                        gatewayOnline = state.gatewayOnline,
+                        onCommand = { action ->
+                            viewModel.sendCommand(device.id, action)
+                        },
+                        onOpen = { screen.showDetail(device.id) },
+                    )
+                }
+            }
+        }
+    }
+
+    screen.detailDeviceId?.let { id -> devices.firstOrNull { it.id == id } }?.let { device ->
+        DeviceDetailSheet(
+            device = device,
+            pending = state.pendingDeviceId == device.id,
+            gatewayOnline = state.gatewayOnline,
+            onCommand = { action -> viewModel.sendCommand(device.id, action) },
+            onEdit = { screen.showEditor(device.id) },
+            onRemove = { screen.requestRemoval(device.id) },
+            onClose = screen::dismissDetail,
+        )
+    }
+
+    screen.editingDeviceId?.let { id -> devices.firstOrNull { it.id == id } }?.let { device ->
+        DeviceEditDialog(
+            device = device,
+            onSave = { name, location -> viewModel.saveDevice(device.id, name, location) },
+            onDismiss = screen::dismissEditor,
+        )
+    }
+
+    if (state.learning.visible) {
+        LearningSheet(
+            learning = state.learning.session,
+            busy = state.learning.busy,
+            gatewayOnline = state.gatewayOnline,
+            // The sheet reports learning failures only; a stale command
+            // or refresh error is unrelated to this flow.
+            errorText = state.learning.error,
+            testMessage = state.learning.testMessage,
+            completedDeviceName = state.learning.completedDeviceName,
+            deviceNameForId = { id -> devices.firstOrNull { it.id == id }?.name },
+            onStart = viewModel::startLearning,
+            onAccept = viewModel::acceptCandidate,
+            onRescan = viewModel::rescan,
+            onTest = viewModel::test,
+            onConfirm = viewModel::confirmLearning,
+            onClose = viewModel::closeLearning,
+        )
+    }
+
+    screen.removalDeviceId?.let { id -> devices.firstOrNull { it.id == id } }?.let { target ->
+        AlertDialog(
+            onDismissRequest = screen::dismissRemoval,
+            shape = AppShapes.Dialog,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            icon = { DeleteDialogIcon() },
+            title = { Text("移除遥控器？") },
+            text = {
+                Text(
+                    "将从服务端删除“${target.name}”，并释放开码/关码。" +
+                        "此操作不会向网关发送任何 RF 指令，也无法撤销已下发的物理动作。",
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        screen.dismissRemoval()
+                        viewModel.removeDevice(target.id)
+                    },
+                    shape = CircleShape,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) {
+                    Text("移除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = screen::dismissRemoval) {
+                    Text("取消")
+                }
+            },
+        )
+    }
+}
+
+private fun String?.orNullIfEmpty(): String? = this?.ifEmpty { null }
